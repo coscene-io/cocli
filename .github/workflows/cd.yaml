@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  upload-cli-artifact-to-oss:
+  build-and-upload-cli-artifact:
     strategy:
       matrix:
         include:
@@ -27,8 +27,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Check version
       - name: Check if version is semantic
         run: echo "${{ github.ref_name }}" | grep -q -E '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-((0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+      - name: Check if version is release or beta
+        run: |
+          if echo "${{ github.ref_name }}" | grep -q -E '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'; then
+            echo "IS_RELEASE=true" >> $GITHUB_ENV
+          else
+            echo "IS_RELEASE=false" >> $GITHUB_ENV
+          fi
+      
+      # Build
       - name: Checkout
         uses: actions/checkout@v3
       - name: Set up go
@@ -36,8 +46,43 @@ jobs:
       - name: Build cocli
         run: |
           GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build-binary
-          mv bin/cocli bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
+          cp bin/cocli cocli
+          cp bin/cocli bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
+      
+      # Upload to GitHub release
       - name: Upload release artifact
         uses: softprops/action-gh-release@v2
         with:
           files: bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
+  
+      # Upload to oss
+      - name: Install gzip
+        run: sudo apt-get update && sudo apt-get install -y gzip
+      - name: Build release metadata files
+        if: env.IS_RELEASE == 'true'
+        run: |
+          SHA256SUM=$(sha256sum cocli | awk '{print $1}' | xxd -r -p | base64) 
+          echo "{\"Version\": \"${{ github.ref_name }}\", \"Sha256\": \"$SHA256SUM\"}" > ${{ matrix.os }}-${{ matrix.arch }}.json
+      - name: gzip cocli
+        run: gzip cocli
+      - name: Upload cocli to oss corresponding version
+        uses: tvrcgo/oss-action@master
+        with:
+          key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          region: oss-cn-hangzhou
+          bucket: coscene-download
+          assets: |
+            cocli.gz:/cocli/${{ github.ref_name }}/${{ matrix.os }}-${{ matrix.arch }}.gz
+      - name: Upload cocli to oss latest
+        if: env.IS_RELEASE == 'true'
+        uses: tvrcgo/oss-action@master
+        with:
+          key-id: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          key-secret: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          region: oss-cn-hangzhou
+          bucket: coscene-download
+          assets: |
+            cocli.gz:/cocli/latest/${{ matrix.os }}-${{ matrix.arch }}.gz
+            ${{ matrix.os }}-${{ matrix.arch }}.json:/cocli/${{ matrix.os }}-${{ matrix.arch }}.json
+
