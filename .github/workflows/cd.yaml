@@ -1,0 +1,43 @@
+name: CD
+
+on:
+  release:
+    types:
+      - released
+      - prereleased
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upload-cli-artifact-to-oss:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            os: linux
+          - arch: amd64
+            os: darwin
+          - arch: arm64
+            os: linux
+          - arch: arm64
+            os: darwin
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check if version is semantic
+        run: echo "${{ github.ref_name }}" | grep -q -E '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-((0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(\.(0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(\+([0-9a-zA-Z-]+(\.[0-9a-zA-Z-]+)*))?$'
+      - name: Checkout
+        uses: actions/checkout@v3
+      - name: Set up go
+        uses: actions/setup-go@v4
+      - name: Build cocli
+        run: |
+          make build-binary
+          mv bin/cocli bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
+      - name: Upload release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
