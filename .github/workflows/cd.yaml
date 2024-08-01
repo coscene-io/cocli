@@ -35,7 +35,7 @@ jobs:
         uses: actions/setup-go@v4
       - name: Build cocli
         run: |
-          make build-binary
+          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build-binary
           mv bin/cocli bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
       - name: Upload release artifact
         uses: softprops/action-gh-release@v2
