@@ -6,6 +6,13 @@
 
 另外，`cocli` 所有的命令都可以通过添加 `-h` 参数查看帮助文档。
 
+## 安装
+
+```shell
+# 通过 curl 安装
+curl -fL https://download.coscene.cn/cocli/install.sh | sh
+```
+
 ## 本地安装
 
 ### 克隆代码
@@ -28,4 +35,3 @@ mv bin/cocli /usr/local/bin/
 # 运行 cocli 命令, 查看帮助文档, 确认安装成功
 cocli -h
 ```
-
