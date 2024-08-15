@@ -23,7 +23,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/coscene-io/cocli/internal/fs"
+	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	log "github.com/sirupsen/logrus"
@@ -60,7 +60,7 @@ func (pr *Progress) Print() {
 // um is the upload manager to use.
 // file is the absolute path of the file to be uploaded.
 // uploadUrl is the pre-signed url to upload the file to.
-func UploadFileThroughUrl(um *UploadManager, file string, uploadUrl string) error {
+func UploadFileThroughUrl(um *upload_utils.UploadManager, file string, uploadUrl string) error {
 	parsedUrl, err := url.Parse(uploadUrl)
 	if err != nil {
 		return errors.Wrap(err, "parse upload url failed")
@@ -84,16 +84,7 @@ func UploadFileThroughUrl(um *UploadManager, file string, uploadUrl string) erro
 	}
 	key := strings.TrimPrefix(parsedUrl.Path, "/default/")
 
-	// Calculate checksum
-	checksum, _, err := fs.CalSha256AndSize(file)
-	if err != nil {
-		return errors.Wrap(err, "calculate sha256 failed")
-	}
-
-	if err = um.FPutObject(file, "default", key, checksum, tags); err != nil {
-		return errors.Wrap(err, "upload file failed")
-	}
-
+	um.FPutObject(file, "default", key, tags)
 	return nil
 }
 

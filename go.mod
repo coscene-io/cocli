@@ -17,6 +17,7 @@ require (
 	github.com/knadh/koanf/v2 v2.1.1
 	github.com/mattn/go-runewidth v0.0.15
 	github.com/minio/minio-go/v7 v7.0.61
+	github.com/minio/sha256-simd v1.0.1
 	github.com/muesli/reflow v0.3.0
 	github.com/oriser/regroup v0.0.0-20210730155327-fca8d7531263
 	github.com/pkg/errors v0.9.1
@@ -51,7 +52,6 @@ require (
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/minio/md5-simd v1.1.2 // indirect
-	github.com/minio/sha256-simd v1.0.1 // indirect
 	github.com/mitchellh/copystructure v1.2.0 // indirect
 	github.com/mitchellh/reflectwalk v1.0.2 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

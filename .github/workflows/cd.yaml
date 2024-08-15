@@ -45,7 +45,7 @@ jobs:
         uses: actions/setup-go@v4
       - name: Build cocli
         run: |
-          GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build-binary
+          CGO_ENABLED=0 GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} make build-binary
           cp bin/cocli cocli
           cp bin/cocli bin/cocli-${{ matrix.os }}-${{ matrix.arch }}
       

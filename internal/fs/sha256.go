@@ -15,10 +15,11 @@
 package fs
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/minio/sha256-simd"
 
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
