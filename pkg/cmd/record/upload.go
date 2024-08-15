@@ -27,8 +27,10 @@ import (
 	"github.com/coscene-io/cocli/internal/fs"
 	"github.com/coscene-io/cocli/internal/name"
 	"github.com/coscene-io/cocli/pkg/cmd_utils"
+	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -92,7 +94,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			if err != nil {
 				log.Fatalf("unable to create minio client: %v", err)
 			}
-			um, err := cmd_utils.NewUploadManager(mc)
+			um, err := upload_utils.NewUploadManager(mc)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -105,25 +107,24 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 				for fileResourceName, uploadUrl := range fileUploadUrls {
 					fileResource, err := name.NewFile(fileResourceName)
 					if err != nil {
-						log.Errorf("Unable to parse %v as file resource name", fileResourceName)
+						um.AddErr(fileResourceName, errors.Wrapf(err, "unable to parse file resource name"))
 						continue
 					}
 
 					fileAbsolutePath := path.Join(relativeDir, fileResource.Filename)
 
-					err = cmd_utils.UploadFileThroughUrl(um, fileAbsolutePath, uploadUrl)
-					if err != nil {
-						log.Errorf("Unable to upload file %v, error: %+v", fileAbsolutePath, err)
+					if err = cmd_utils.UploadFileThroughUrl(um, fileAbsolutePath, uploadUrl); err != nil {
+						um.AddErr(fileAbsolutePath, errors.Wrapf(err, "unable to upload file"))
 						continue
 					}
 				}
 			}
 
 			um.Wait()
-			if um.Errs != nil {
+			if len(um.Errs) > 0 {
 				fmt.Printf("\n%d files failed to upload\n", len(um.Errs))
-				for _, uploadErr := range um.Errs {
-					fmt.Printf("Upload %v failed with: %v\n", uploadErr.Path, uploadErr.Err)
+				for kPath, vErr := range um.Errs {
+					fmt.Printf("Upload %v failed with: \n%v\n\n", kPath, vErr)
 				}
 				return
 			}
@@ -144,21 +145,33 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	return cmd
 }
 
-func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-chan string, recordName *name.Record, relativeDir string, um *cmd_utils.UploadManager) <-chan map[string]string {
+func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-chan string, recordName *name.Record, relativeDir string, um *upload_utils.UploadManager) <-chan map[string]string {
 	ret := make(chan map[string]string)
 	go func() {
 		defer close(ret)
 		var files []*openv1alpha1resource.File
 		for f := range filesGenerator {
+			um.StatusMonitor.Send(upload_utils.AddFileMsg{
+				Name: f,
+			})
 			checksum, size, err := fs.CalSha256AndSize(f)
 			if err != nil {
-				log.Errorf("unable to calculate sha256 for file: %v", err)
+				um.AddErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
 				continue
 			}
+			um.FileInfos[f] = upload_utils.FileInfo{
+				Path:   f,
+				Size:   size,
+				Sha256: checksum,
+			}
+			um.StatusMonitor.Send(upload_utils.UpdateStatusMsg{
+				Name:  f,
+				Total: size,
+			})
 
 			relativePath, err := filepath.Rel(relativeDir, f)
 			if err != nil {
-				log.Errorf("unable to get relative path: %v", err)
+				um.AddErr(f, errors.Wrapf(err, "unable to get relative path"))
 				continue
 			}
 
@@ -169,7 +182,10 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 				Filename:  relativePath,
 			}.String())
 			if err == nil && getFileRes.Sha256 == checksum && getFileRes.Size == size {
-				um.AddUploadedFile(f)
+				um.StatusMonitor.Send(upload_utils.UpdateStatusMsg{
+					Name:   f,
+					Status: upload_utils.PreviouslyUploaded,
+				})
 				continue
 			}
 
@@ -187,7 +203,9 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 			if len(files) == processBatchSize {
 				res, err := fileClient.GenerateFileUploadUrls(context.TODO(), recordName, files)
 				if err != nil {
-					log.Errorf("Failed to generate upload urls: %v", err)
+					for _, file := range files {
+						um.AddErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
+					}
 					continue
 				}
 				ret <- res
@@ -198,7 +216,9 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 		if len(files) > 0 {
 			res, err := fileClient.GenerateFileUploadUrls(context.TODO(), recordName, files)
 			if err != nil {
-				log.Errorf("Failed to generate upload urls: %v", err)
+				for _, file := range files {
+					um.AddErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
+				}
 				return
 			}
 			ret <- res

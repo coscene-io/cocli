@@ -22,6 +22,7 @@ import (
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/name"
 	"github.com/coscene-io/cocli/pkg/cmd_utils"
+	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	log "github.com/sirupsen/logrus"
@@ -95,7 +96,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 					log.Fatalf("unable to create minio client: %v", err)
 				}
 
-				um, err := cmd_utils.NewUploadManager(mc)
+				um, err := upload_utils.NewUploadManager(mc)
 				if err != nil {
 					log.Fatalf("Failed to create upload manager: %v", err)
 				}

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package cmd_utils
+package upload_utils
 
 import (
 	"context"
@@ -21,7 +21,6 @@ import (
 	"io"
 	"mime"
 	"os"
-	"os/user"
 	"path"
 	"path/filepath"
 	"strconv"
@@ -29,8 +28,6 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/coscene-io/cocli/internal/fs"
-	"github.com/coscene-io/cocli/internal/prompts"
 	"github.com/minio/minio-go/v7"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
@@ -43,136 +40,140 @@ const (
 	uploadIdKeyTemplate     = "STORE-KEY-UPLOAD-ID-%s"
 	uploadedSizeKeyTemplate = "STORE-KEY-UPLOADED-SIZE-%s"
 	partsKeyTemplate        = "STORE-KEY-PARTS-%s"
-	minPartSize             = 1024 * 1024 * 16       // 16MiB
-	maxSinglePutObjectSize  = 1024 * 1024 * 1024 * 5 // 5GiB
+	minPartSize             = 1024 * 1024 * 16         // 16MiB
+	maxSinglePutObjectSize  = 1024 * 1024 * 1024 * 500 // 5GiB
 	uploadDBRelativePath    = ".cocli.uploader.db"
 )
 
-type UploadManagerErr struct {
-	Err  error
-	Path string
+// FileInfo contains the path, size and sha256 of a file.
+type FileInfo struct {
+	Path   string
+	Size   int64
+	Sha256 string
 }
 
 // UploadManager is a manager for uploading files through minio client.
 // Note that it's user's responsibility to check the Errs field after Wait() to see if there's any error.
 type UploadManager struct {
-	db                       *leveldb.DB
-	client                   *minio.Client
-	uploadProgressChan       chan prompts.UpdateFileMsg
-	statusMonitor            *tea.Program
-	statusMonitorStartSignal *sync.WaitGroup
-	statusMonitorDoneSignal  *sync.WaitGroup
-	Errs                     []UploadManagerErr
+	db                      *leveldb.DB
+	client                  *minio.Client
+	uploadProgressChan      chan UpdateStatusMsg
+	statusMonitorDoneSignal *sync.WaitGroup
+	StatusMonitor           *tea.Program
+	FileInfos               map[string]FileInfo
+	Errs                    map[string]error
 	sync.WaitGroup
 }
 
 func NewUploadManager(client *minio.Client) (*UploadManager, error) {
 	// init db
-	curUser, err := user.Current()
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return nil, errors.Wrap(err, "Get current user failed")
+		return nil, errors.Wrap(err, "Get current user home dir failed")
 	}
 
-	uploadDB, err := leveldb.OpenFile(path.Join(curUser.HomeDir, uploadDBRelativePath), nil)
+	uploadDB, err := leveldb.OpenFile(path.Join(homeDir, uploadDBRelativePath), nil)
 	if err != nil {
 		return nil, errors.Wrap(err, "Open level db failed")
 	}
 
-	u := &UploadManager{
-		uploadProgressChan:       make(chan prompts.UpdateFileMsg, 10),
-		db:                       uploadDB,
-		client:                   client,
-		statusMonitorStartSignal: new(sync.WaitGroup),
-		statusMonitorDoneSignal:  new(sync.WaitGroup),
+	um := &UploadManager{
+		uploadProgressChan:      make(chan UpdateStatusMsg, 10),
+		db:                      uploadDB,
+		client:                  client,
+		statusMonitorDoneSignal: new(sync.WaitGroup),
+		FileInfos:               make(map[string]FileInfo),
+		Errs:                    make(map[string]error),
 	}
 
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
-	u.statusMonitorStartSignal.Add(1)
-	u.statusMonitorDoneSignal.Add(1)
-	u.statusMonitor = tea.NewProgram(prompts.NewUploadStatusMonitor(u.statusMonitorStartSignal))
-	go u.handleUploadMonitor()
-	u.statusMonitorStartSignal.Wait()
+	statusMonitorStartSignal := new(sync.WaitGroup)
+	statusMonitorStartSignal.Add(1)
+	um.statusMonitorDoneSignal.Add(1)
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal))
+	go um.runUploadStatusMonitor()
+	statusMonitorStartSignal.Wait()
 
-	go u.handleUploadProgress()
-
-	return u, nil
+	go um.handleUploadProgress()
+	return um, nil
 }
 
-// Wait waits for all uploads to finish. And wait for status monitor to finish.
-func (u *UploadManager) Wait() {
-	u.WaitGroup.Wait()
-	time.Sleep(1 * time.Second) // Buffer time for status monitor to finish receiving messages.
-	u.statusMonitor.Quit()
-	u.statusMonitorDoneSignal.Wait()
-}
-
-// AddUploadedFile sends a message to status monitor to add uploaded file.
-func (u *UploadManager) AddUploadedFile(name string) {
-	u.statusMonitor.Send(prompts.AddUploadedFileMsg{Name: name})
-}
-
-// FPutObject uploads a file to a bucket with a key and sha256.
-// If the file size is larger than minPartSize, it will use multipart upload.
-func (u *UploadManager) FPutObject(absPath string, bucket string, key string, sha256 string, userTags map[string]string) error {
-	// Check if file sha256 matches.
-	actualSha256, size, err := fs.CalSha256AndSize(absPath)
-	if err != nil {
-		return errors.Wrap(err, "Cal file sha256 failed")
-	}
-	if actualSha256 != sha256 {
-		return errors.New("File sha256 not match, actual: " + actualSha256 + ", expect: " + sha256)
-	}
-
-	u.Add(1)
-	go func() {
-		defer u.Done()
-		u.client.TraceOn(log.StandardLogger().WriterLevel(log.DebugLevel))
-
-		if size > int64(minPartSize) {
-			u.statusMonitor.Send(prompts.AddFileMsg{Name: absPath, Total: size, IsMultiPart: true})
-			err = u.FMultipartPutObject(context.Background(), bucket, key,
-				absPath, size, minio.PutObjectOptions{UserTags: userTags})
-		} else {
-			u.statusMonitor.Send(prompts.AddFileMsg{Name: absPath, Total: size, IsMultiPart: false})
-			progress := newUploadProgressReader(absPath, size, u.uploadProgressChan)
-			_, err = u.client.FPutObject(context.Background(), bucket, key, absPath,
-				minio.PutObjectOptions{Progress: progress, UserTags: userTags})
-		}
-		if err != nil {
-			u.Errs = append(u.Errs, UploadManagerErr{Err: err, Path: absPath})
-		}
-	}()
-	return nil
-}
-
-func (u *UploadManager) handleUploadMonitor() {
-	defer u.statusMonitorDoneSignal.Done()
-	_, err := u.statusMonitor.Run()
+func (um *UploadManager) runUploadStatusMonitor() {
+	defer um.statusMonitorDoneSignal.Done()
+	_, err := um.StatusMonitor.Run()
 	if err != nil {
 		log.Fatalf("Error running upload status monitor: %v", err)
 	}
 }
 
-func (u *UploadManager) handleUploadProgress() {
+func (um *UploadManager) handleUploadProgress() {
 	for {
-		progress := <-u.uploadProgressChan
-		u.statusMonitor.Send(progress)
+		progress := <-um.uploadProgressChan
+		um.StatusMonitor.Send(progress)
 	}
 }
 
-func (u *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, key string, filePath string, fileSize int64, opts minio.PutObjectOptions) (err error) {
+// Wait waits for all uploads to finish. And wait for status monitor to finish.
+func (um *UploadManager) Wait() {
+	um.WaitGroup.Wait()
+	time.Sleep(1 * time.Second) // Buffer time for status monitor to finish receiving messages.
+	um.StatusMonitor.Quit()
+	um.statusMonitorDoneSignal.Wait()
+}
+
+// AddErr adds an error to the manager.
+func (um *UploadManager) AddErr(path string, err error) {
+	um.StatusMonitor.Send(UpdateStatusMsg{
+		Name:   path,
+		Status: UploadFailed,
+	})
+	um.Errs[path] = err
+}
+
+// FPutObject uploads a file to a bucket with a key and sha256.
+// If the file size is larger than minPartSize, it will use multipart upload.
+func (um *UploadManager) FPutObject(absPath string, bucket string, key string, userTags map[string]string) {
+	// Check if file sha256 matches.
+	fileInfo, ok := um.FileInfos[absPath]
+	if !ok {
+		um.AddErr(absPath, errors.New("File info not found"))
+		return
+	}
+
+	um.Add(1)
+	go func() {
+		defer um.Done()
+		um.client.TraceOn(log.StandardLogger().WriterLevel(log.DebugLevel))
+
+		var err error
+		if fileInfo.Size > int64(minPartSize) {
+			err = um.FMultipartPutObject(context.Background(), bucket, key,
+				absPath, fileInfo.Size, minio.PutObjectOptions{UserTags: userTags})
+		} else {
+			progress := newUploadProgressReader(absPath, fileInfo.Size, um.uploadProgressChan)
+			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
+			_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
+				minio.PutObjectOptions{Progress: progress, UserTags: userTags})
+		}
+		if err != nil {
+			um.AddErr(absPath, err)
+		}
+	}()
+}
+
+func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, key string, filePath string, fileSize int64, opts minio.PutObjectOptions) (err error) {
 	// Check for largest object size allowed.
 	if fileSize > int64(maxSinglePutObjectSize) {
 		return errors.Errorf("Your proposed upload size ‘%d’ exceeds the maximum allowed object size ‘%d’ for single PUT operation.", fileSize, maxSinglePutObjectSize)
 	}
 
-	c := minio.Core{Client: u.client}
+	c := minio.Core{Client: um.client}
 
 	// ----------------- Start fetching previous upload info from db -----------------
 	// Fetch upload id. If not found, initiate a new multipart upload.
 	var uploadId string
 	uploadIdKey := fmt.Sprintf(uploadIdKeyTemplate, filePath)
-	uploadIdBytes, err := u.db.Get([]byte(uploadIdKey), nil)
+	uploadIdBytes, err := um.db.Get([]byte(uploadIdKey), nil)
 	if err != nil {
 		log.Debugf("Get upload id by: %s warn: %v", uploadIdKey, err)
 	}
@@ -200,7 +201,7 @@ func (u *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, 
 	// Fetch uploaded size
 	var uploadedSize int64
 	uploadedSizeKey := fmt.Sprintf(uploadedSizeKeyTemplate, filePath)
-	uploadedSizeBytes, err := u.db.Get([]byte(uploadedSizeKey), nil)
+	uploadedSizeBytes, err := um.db.Get([]byte(uploadedSizeKey), nil)
 	if err != nil {
 		log.Debugf("Get uploaded size by: %s warn: %v", uploadedSizeKey, err)
 	}
@@ -212,13 +213,13 @@ func (u *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, 
 	} else {
 		uploadedSize = 0
 	}
-	u.statusMonitor.Send(prompts.UpdateFileMsg{Name: filePath, Uploaded: uploadedSize})
+	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Uploaded: uploadedSize, Status: UploadInProgress})
 	log.Debugf("Get uploaded size: %d by: %s", uploadedSize, uploadedSizeKey)
 
 	// Fetch uploaded parts
 	var parts []minio.CompletePart
 	partsKey := fmt.Sprintf(partsKeyTemplate, filePath)
-	partsBytes, err := u.db.Get([]byte(partsKey), nil)
+	partsBytes, err := um.db.Get([]byte(partsKey), nil)
 	if err != nil {
 		log.Debugf("Get uploaded parts by: %s warn: %v", partsKey, err)
 	}
@@ -357,13 +358,15 @@ func (u *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, 
 			batch.Put([]byte(uploadIdKey), []byte(uploadId))
 			batch.Put([]byte(partsKey), partsJsonBytes)
 			batch.Put([]byte(uploadedSizeKey), []byte(strconv.FormatInt(uploadedSize, 10)))
-			err = u.db.Write(batch, nil)
+			err = um.db.Write(batch, nil)
 			if err != nil {
 				log.Errorf("Store uploaded parts err: %v", err)
 			}
-			u.uploadProgressChan <- prompts.UpdateFileMsg{Name: filePath, Uploaded: uploadedSize}
+			um.uploadProgressChan <- UpdateStatusMsg{Name: filePath, Uploaded: uploadedSize}
 		}
 	}
+
+	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Status: MultipartCompletionInProgress})
 
 	// Verify if we uploaded all the data.
 	if uploadedSize != fileSize {
@@ -384,11 +387,11 @@ func (u *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, 
 	batchDelete.Delete([]byte(uploadIdKey))
 	batchDelete.Delete([]byte(partsKey))
 	batchDelete.Delete([]byte(uploadedSizeKey))
-	err = u.db.Write(batchDelete, nil)
+	err = um.db.Write(batchDelete, nil)
 	if err != nil {
 		return errors.Wrapf(err, "Batch delete parts failed")
 	}
-	u.statusMonitor.Send(prompts.CompleteMultipartMsg{Name: filePath})
+	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Status: UploadCompleted})
 
 	return nil
 }
@@ -397,18 +400,23 @@ type uploadProgressReader struct {
 	absPath            string
 	total              int64
 	uploaded           int64
-	uploadProgressChan chan prompts.UpdateFileMsg
+	uploadProgressChan chan UpdateStatusMsg
 }
 
-func newUploadProgressReader(absPath string, total int64, uploadProgressChan chan prompts.UpdateFileMsg) *uploadProgressReader {
-	uploadProgressChan <- prompts.UpdateFileMsg{Name: absPath, Uploaded: 0}
+func newUploadProgressReader(absPath string, total int64, uploadProgressChan chan UpdateStatusMsg) *uploadProgressReader {
+	uploadProgressChan <- UpdateStatusMsg{Name: absPath, Uploaded: 0}
 	return &uploadProgressReader{absPath: absPath, total: total, uploaded: 0, uploadProgressChan: uploadProgressChan}
 }
 
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n := int64(len(b))
 	r.uploaded += n
-	r.uploadProgressChan <- prompts.UpdateFileMsg{Name: r.absPath, Uploaded: r.uploaded}
+
+	updateMsg := UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded}
+	if r.uploaded == r.total {
+		updateMsg.Status = UploadCompleted
+	}
+	r.uploadProgressChan <- updateMsg
 	return int(n), nil
 }
 
