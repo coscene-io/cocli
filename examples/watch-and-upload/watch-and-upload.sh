@@ -3,10 +3,10 @@
 set -o errexit
 set -o nounset
 set -o pipefail
+trap 'echo "正在退出..."; exit' INT
 if [[ "${TRACE-0}" == "1" ]]; then
     set -o xtrace
 fi
-trap 'echo "正在退出..."; exit' INT
 
 if [[ "${1-}" =~ ^-*h(elp)?$ ]]; then
     echo '用法: ./watch-and-upload.sh [WATCH_DIR]
@@ -33,8 +33,8 @@ if [ ! -d "$WATCH_DIR" ]; then
 fi
 
 # 定义日志文件
-UPLOAD_LOGS="/tmp/.UPLOAD_LOGS"
-RECORD_LOGS="/tmp/.RECORD_LOGS"
+UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
+RECORD_LOGS="$HOME/.RECORD_LOGS"
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
