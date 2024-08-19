@@ -6,6 +6,7 @@ set -o pipefail
 if [[ "${TRACE-0}" == "1" ]]; then
     set -o xtrace
 fi
+trap 'echo "正在退出..."; exit' INT
 
 if [[ "${1-}" =~ ^-*h(elp)?$ ]]; then
     echo '用法: ./watch-and-upload.sh [WATCH_DIR]
@@ -32,8 +33,8 @@ if [ ! -d "$WATCH_DIR" ]; then
 fi
 
 # 定义日志文件
-UPLOAD_LOGS="$WATCH_DIR/.UPLOAD_LOGS"
-RECORD_LOGS="$WATCH_DIR/.RECORD_LOGS"
+UPLOAD_LOGS="/tmp/.UPLOAD_LOGS"
+RECORD_LOGS="/tmp/.RECORD_LOGS"
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
@@ -91,8 +92,8 @@ process_file() {
         record_id=$(get_current_record_id)
 
         if cocli record upload "$record_id" "$file"; then
+            sed -i "\|${file//\//\\/}|d" "$UPLOAD_LOGS"
             echo "$(date +'%Y-%m-%d %H:%M:%S')|$file|$md5sum" >>"$UPLOAD_LOGS"
-            echo "已上传: $file"
         else
             echo "上传失败: $file" >&2
         fi
@@ -101,32 +102,12 @@ process_file() {
     fi
 }
 
-function search_files() {
-    local dir="$1"
-
-    # 遍历目录中的所有文件和子文件夹
-    for file in "$dir"/*; do
-        # 跳过当前目录 . 和上级目录 ..
-        if [ "$file" == "$dir/." ] || [ "$file" == "$dir/.." ]; then
-            continue
-        fi
-
-        if [ -d "$file" ]; then
-            # 如果是目录，则递归调用 search_files
-            search_files "$file"
-        elif [ -f "$file" ]; then
-            # 如果是文件，检查后缀
-            if [[ "$file" == *".log" ]]; then
-                process_file "$file"
-            fi
-        fi
-    done
-}
-
 # 对于已有文件也做检查
 initialize() {
     echo "正在检查现有文件..."
-    search_files "$WATCH_DIR"
+    find "$WATCH_DIR" -type f -not -path '*/\.*' -print0 | while IFS= read -r -d '' file; do
+        process_file "$file"
+    done
     echo "初始化完成。"
 }
 
@@ -135,10 +116,15 @@ main() {
     initialize
 
     echo "开始监控目录: $WATCH_DIR"
-    fswatch -0 -r -e "(/|^)\.[^/]*$" "$WATCH_DIR" | while read -d "" file; do
-        if [ -f "$file" ] && [[ "$(basename "$file")" != .* ]]; then
-            echo "正在处理 $file"
-            process_file "$file"
+    fswatch --latency=5.0 --event Created --event Updated --event MovedTo -0 -r \
+        -e "(/|^)\.[^/]*$" \
+        -e "/sed.*\.tmp$" \
+        "$WATCH_DIR" | while read -d "" event; do
+
+        echo $event
+        if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
+            echo "正在处理 $event"
+            process_file "$event"
         fi
     done
 }
