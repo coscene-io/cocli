@@ -101,12 +101,32 @@ process_file() {
     fi
 }
 
+function search_files() {
+    local dir="$1"
+
+    # 遍历目录中的所有文件和子文件夹
+    for file in "$dir"/*; do
+        # 跳过当前目录 . 和上级目录 ..
+        if [ "$file" == "$dir/." ] || [ "$file" == "$dir/.." ]; then
+            continue
+        fi
+
+        if [ -d "$file" ]; then
+            # 如果是目录，则递归调用 search_files
+            search_files "$file"
+        elif [ -f "$file" ]; then
+            # 如果是文件，检查后缀
+            if [[ "$file" == *".log" ]]; then
+                process_file "$file"
+            fi
+        fi
+    done
+}
+
 # 对于已有文件也做检查
 initialize() {
     echo "正在检查现有文件..."
-    find "$WATCH_DIR" -type f -not -path '*/\.*' -print0 | while IFS= read -r -d '' file; do
-        process_file "$file"
-    done
+    search_files "$WATCH_DIR"
     echo "初始化完成。"
 }
 
