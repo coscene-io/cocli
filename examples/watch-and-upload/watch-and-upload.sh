@@ -91,6 +91,7 @@ process_file() {
         record_id=$(get_current_record_id)
 
         if cocli record upload "$record_id" "$file"; then
+            sed -i "\|${file//\//\\/}|d" "$UPLOAD_LOGS"
             echo "$(date +'%Y-%m-%d %H:%M:%S')|$file|$md5sum" >>"$UPLOAD_LOGS"
             echo "已上传: $file"
         else
@@ -115,7 +116,10 @@ main() {
     initialize
 
     echo "开始监控目录: $WATCH_DIR"
-    fswatch -0 -r -e "(/|^)\.[^/]*$" "$WATCH_DIR" | while read -d "" file; do
+    fswatch --event "Created" --event "Updated" --event "MovedTo" -0 -r \
+        -e "(/|^)\.[^/]*$" \
+        "$WATCH_DIR" | while read -d "" file; do
+        # echo $file
         if [ -f "$file" ] && [[ "$(basename "$file")" != .* ]]; then
             echo "正在处理 $file"
             process_file "$file"
