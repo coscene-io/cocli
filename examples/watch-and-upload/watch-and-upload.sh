@@ -91,7 +91,10 @@ process_file() {
         record_id=$(get_current_record_id)
 
         if cocli record upload "$record_id" "$file"; then
+<<<<<<< HEAD
             sed -i "\|${file//\//\\/}|d" "$UPLOAD_LOGS"
+=======
+>>>>>>> main
             echo "$(date +'%Y-%m-%d %H:%M:%S')|$file|$md5sum" >>"$UPLOAD_LOGS"
             echo "已上传: $file"
         else
