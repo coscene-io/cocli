@@ -36,6 +36,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 		projectSlug       = ""
 		labelDisplayNames []string
 		thumbnail         = ""
+		multiOpts         = &upload_utils.MultipartOpts{}
 	)
 
 	cmd := &cobra.Command{
@@ -96,7 +97,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 					log.Fatalf("unable to create minio client: %v", err)
 				}
 
-				um, err := upload_utils.NewUploadManager(mc)
+				um, err := upload_utils.NewUploadManager(mc, multiOpts)
 				if err != nil {
 					log.Fatalf("Failed to create upload manager: %v", err)
 				}
@@ -114,6 +115,8 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringSliceVarP(&labelDisplayNames, "labels", "l", []string{}, "labels of the record.")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
 	cmd.Flags().StringVarP(&thumbnail, "thumbnail", "i", "", "thumbnail path of the record.")
+	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
+	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
 
 	return cmd
 }

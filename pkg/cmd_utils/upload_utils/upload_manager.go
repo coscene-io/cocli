@@ -40,8 +40,8 @@ const (
 	uploadIdKeyTemplate     = "STORE-KEY-UPLOAD-ID-%s"
 	uploadedSizeKeyTemplate = "STORE-KEY-UPLOADED-SIZE-%s"
 	partsKeyTemplate        = "STORE-KEY-PARTS-%s"
-	minPartSize             = 1024 * 1024 * 16         // 16MiB
-	maxSinglePutObjectSize  = 1024 * 1024 * 1024 * 500 // 5GiB
+	maxSinglePutObjectSize  = 1024 * 1024 * 1024 * 500 // 500GiB
+	defaultWindowSize       = 1024 * 1024 * 1024       // 1GiB
 	uploadDBRelativePath    = ".cocli.uploader.db"
 )
 
@@ -55,6 +55,7 @@ type FileInfo struct {
 // UploadManager is a manager for uploading files through minio client.
 // Note that it's user's responsibility to check the Errs field after Wait() to see if there's any error.
 type UploadManager struct {
+	opts                    *MultipartOpts
 	db                      *leveldb.DB
 	client                  *minio.Client
 	uploadProgressChan      chan UpdateStatusMsg
@@ -65,7 +66,7 @@ type UploadManager struct {
 	sync.WaitGroup
 }
 
-func NewUploadManager(client *minio.Client) (*UploadManager, error) {
+func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager, error) {
 	// init db
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -78,6 +79,7 @@ func NewUploadManager(client *minio.Client) (*UploadManager, error) {
 	}
 
 	um := &UploadManager{
+		opts:                    opts,
 		uploadProgressChan:      make(chan UpdateStatusMsg, 10),
 		db:                      uploadDB,
 		client:                  client,
@@ -143,12 +145,17 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 	um.Add(1)
 	go func() {
 		defer um.Done()
-		um.client.TraceOn(log.StandardLogger().WriterLevel(log.DebugLevel))
+		um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
 
-		var err error
-		if fileInfo.Size > int64(minPartSize) {
+		size, err := um.opts.partSize()
+		if err != nil {
+			um.AddErr(absPath, err)
+			return
+		}
+
+		if fileInfo.Size > int64(size) {
 			err = um.FMultipartPutObject(context.Background(), bucket, key,
-				absPath, fileInfo.Size, minio.PutObjectOptions{UserTags: userTags})
+				absPath, fileInfo.Size, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
 		} else {
 			progress := newUploadProgressReader(absPath, fileInfo.Size, um.uploadProgressChan)
 			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
@@ -247,38 +254,33 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		}
 	}
 
-	if opts.PartSize == 0 {
-		opts.PartSize = minPartSize
-	}
-
 	// Calculate the optimal parts info for a given size.
 	totalPartsCount, partSize, lastPartSize, err := minio.OptimalPartInfo(fileSize, opts.PartSize)
 	if err != nil {
 		return errors.Wrap(err, "Optimal part info failed")
 	}
+	log.Debugf("Total part: %v, part size: %v, last part size: %v", totalPartsCount, partSize, lastPartSize)
 
 	// Declare a channel that sends the next part number to be uploaded.
-	uploadPartsCh := make(chan int)
+	uploadPartsCh := make(chan int, opts.NumThreads)
 	// Declare a channel that sends back the response of a part upload.
-	uploadedPartsCh := make(chan uploadedPartRes)
+	uploadedPartsCh := make(chan uploadedPartRes, opts.NumThreads)
 	// Used for readability, lastPartNumber is always totalPartsCount.
 	lastPartNumber := totalPartsCount
 
-	// Send each part number to the channel to be processed.
-	go func() {
-		defer close(uploadPartsCh)
-		for p := 1; p <= totalPartsCount; p++ {
-			if slices.Contains(partNumbers, p) {
-				log.Debugf("Part: %d already uploaded", p)
-				continue
-			}
-			log.Debugf("Part: %d need to upload", p)
-			uploadPartsCh <- p
+	curPart := 1
+	uploadingParts := NewHeap(make([]int, 0, opts.NumThreads))
+	for curPart <= totalPartsCount && uploadingParts.Len() < int(opts.NumThreads) {
+		if slices.Contains(partNumbers, curPart) {
+			log.Debugf("Part: %d already uploaded", curPart)
+			curPart++
+			continue
 		}
-	}()
 
-	if opts.NumThreads == 0 {
-		opts.NumThreads = 4
+		log.Debugf("Part: %d need to upload", curPart)
+		uploadingParts.Push(curPart)
+		uploadPartsCh <- curPart
+		curPart++
 	}
 
 	// Get reader of the file to be uploaded.
@@ -329,9 +331,8 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		}()
 	}
 
-	// Gather the responses as they occur and update any progress bar
-	numToUpload := totalPartsCount - len(partNumbers)
-	for m := 1; m <= numToUpload; m++ {
+upload:
+	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -339,6 +340,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 			if uploadRes.Error != nil {
 				return uploadRes.Error
 			}
+
 			// Update the uploadedSize.
 			uploadedSize += uploadRes.Part.Size
 			parts = append(parts, minio.CompletePart{
@@ -363,6 +365,31 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 				log.Errorf("Store uploaded parts err: %v", err)
 			}
 			um.uploadProgressChan <- UpdateStatusMsg{Name: filePath, Uploaded: uploadedSize}
+
+			uploadingParts.Remove(uploadRes.Part.PartNumber)
+			if curPart > totalPartsCount {
+				if uploadingParts.Len() > 0 {
+					continue
+				} else {
+					close(uploadPartsCh)
+					break upload
+				}
+			} else {
+				windowSize := defaultWindowSize
+				// Make sure at least one part is uploading.
+				if windowSize < int(opts.PartSize) {
+					windowSize = int(opts.PartSize)
+				}
+				for ; curPart <= totalPartsCount && uploadingParts.Len() < int(opts.NumThreads) && (curPart-uploadingParts.Peek())*int(opts.PartSize) <= windowSize; curPart++ {
+					if slices.Contains(partNumbers, curPart) {
+						log.Debugf("Part: %d already uploaded", curPart)
+						continue
+					}
+					log.Debugf("Part: %d need to upload", curPart)
+					uploadingParts.Push(curPart)
+					uploadPartsCh <- curPart
+				}
+			}
 		}
 	}
 
