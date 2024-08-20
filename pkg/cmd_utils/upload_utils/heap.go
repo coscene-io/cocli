@@ -30,6 +30,9 @@ func (h *IntHeap) Pop() any {
 }
 
 func (h *IntHeap) Peek() int {
+	if len(*h) == 0 {
+		return 0
+	}
 	return (*h)[0]
 }
 
