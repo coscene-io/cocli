@@ -81,7 +81,6 @@ get_current_record_id() {
 # 处理新文件
 process_file() {
     local file="$1"
-    # 规范化文件路径，移除多余的斜杠
     file=$(realpath -s "$file")
     [ ! -f "$file" ] && return
 
@@ -142,7 +141,6 @@ main() {
         -e "/sed.*\.tmp$" \
         "$WATCH_DIR" | while read -d "" event; do
 
-        # 规范化事件路径，移除多余的斜杠
         event=$(realpath -s "$event")
         echo "$event"
         if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
