@@ -122,13 +122,6 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			}
 
 			um.Wait()
-			if len(um.Errs) > 0 {
-				fmt.Printf("\n%d files failed to upload\n", len(um.Errs))
-				for kPath, vErr := range um.Errs {
-					fmt.Printf("Upload %v failed with: \n%v\n\n", kPath, vErr)
-				}
-				return
-			}
 
 			recordUrl, err := pm.GetRecordUrl(recordName)
 			if err == nil {
