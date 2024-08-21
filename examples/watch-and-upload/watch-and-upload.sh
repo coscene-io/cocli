@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 
+trap 'echo "正在退出脚本..."; exit' INT TERM
 set -o errexit
 set -o nounset
 set -o pipefail
@@ -32,8 +33,8 @@ if [ ! -d "$WATCH_DIR" ]; then
 fi
 
 # 定义日志文件
-UPLOAD_LOGS="$WATCH_DIR/.UPLOAD_LOGS"
-RECORD_LOGS="$WATCH_DIR/.RECORD_LOGS"
+UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
+RECORD_LOGS="$HOME/.RECORD_LOGS"
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
@@ -91,8 +92,8 @@ process_file() {
         record_id=$(get_current_record_id)
 
         if cocli record upload "$record_id" "$file"; then
+            sed -i "\|${file//\//\\/}|d" "$UPLOAD_LOGS"
             echo "$(date +'%Y-%m-%d %H:%M:%S')|$file|$md5sum" >>"$UPLOAD_LOGS"
-            echo "已上传: $file"
         else
             echo "上传失败: $file" >&2
         fi
@@ -135,10 +136,15 @@ main() {
     initialize
 
     echo "开始监控目录: $WATCH_DIR"
-    fswatch -0 -r -e "(/|^)\.[^/]*$" "$WATCH_DIR" | while read -d "" file; do
-        if [ -f "$file" ] && [[ "$(basename "$file")" != .* ]]; then
-            echo "正在处理 $file"
-            process_file "$file"
+    fswatch --event Created --event Updated --event MovedTo -0 -r \
+        -e "(/|^)\.[^/]*$" \
+        -e "/sed.*\.tmp$" \
+        "$WATCH_DIR" | while read -d "" event; do
+
+        echo $event
+        if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
+            echo "正在处理 $event"
+            process_file "$event"
         fi
     done
 }
