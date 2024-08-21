@@ -35,6 +35,7 @@ fi
 # 定义日志文件
 UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
 RECORD_LOGS="$HOME/.RECORD_LOGS"
+NAMING_PATTERN="auto-upload-$(date +'%Y-%m-%d-%H')"
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
@@ -42,12 +43,12 @@ touch "$UPLOAD_LOGS" "$RECORD_LOGS"
 # 在云端创建新记录并获取 RECORD
 create_new_record() {
     local name
-    name="auto-upload-$(date +'%Y-%m-%d-%H')"
+    name="$NAMING_PATTERN"
     local id
     id=$(cocli record create -t "$name" | awk -F'/' '{print $NF}' | tr -d ' \n' | cut -c 1-36)
 
     if [ ${#id} -eq 36 ]; then
-        printf "%s|%s\n" "$(date +'%Y-%m-%d-%H')" "$id" >>"$RECORD_LOGS"
+        printf "%s|%s\n" "$NAMING_PATTERN" "$id" >>"$RECORD_LOGS"
         echo "$id"
     else
         echo "错误: 无法创建有效的记录 ID" >&2
@@ -57,18 +58,16 @@ create_new_record() {
 
 # 获取当前小时的记录 ID
 get_current_record_id() {
-    local current_hour
-    current_hour=$(date +'%Y-%m-%d-%H')
     local id
-    id=$(grep "^$current_hour|" "$RECORD_LOGS" | tail -n 1 | cut -d'|' -f2)
+    id=$(grep "^$NAMING_PATTERN|" "$RECORD_LOGS" | tail -n 1 | cut -d'|' -f2)
 
     if [ ${#id} -ne 36 ]; then
         # 尝试从云端获取记录
-        id=$(cocli record list | grep "$current_hour" | awk '{print $1}' | head -n 1)
+        id=$(cocli record list | grep "$NAMING_PATTERN" | awk '{print $1}' | head -n 1)
 
         if [ ${#id} -eq 36 ]; then
             # 如果从云端找到了有效的ID，将其写入本地记录
-            echo "$current_hour|$id" >>"$RECORD_LOGS"
+            echo "$NAMING_PATTERN|$id" >>"$RECORD_LOGS"
             echo "从云端找到并缓存了记录: $id" >&2
         else
             # 如果云端也没有找到，创建新记录
@@ -82,6 +81,7 @@ get_current_record_id() {
 # 处理新文件
 process_file() {
     local file="$1"
+    file=$(realpath -s "$file")
     [ ! -f "$file" ] && return
 
     local md5sum
@@ -141,7 +141,7 @@ main() {
         -e "/sed.*\.tmp$" \
         "$WATCH_DIR" | while read -d "" event; do
 
-        echo $event
+        event=$(realpath -s "$event")
         if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
             echo "正在处理 $event"
             process_file "$event"
