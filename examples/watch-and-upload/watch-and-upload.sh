@@ -48,7 +48,7 @@ create_new_record() {
     id=$(cocli record create -t "$name" | awk -F'/' '{print $NF}' | tr -d ' \n' | cut -c 1-36)
 
     if [ ${#id} -eq 36 ]; then
-        printf "%s|%s\n" "$NAMING_PATTERN" "$id" >>"$RECORD_LOGS"  # 使用相同的 pattern
+        printf "%s|%s\n" "$NAMING_PATTERN" "$id" >>"$RECORD_LOGS"
         echo "$id"
     else
         echo "错误: 无法创建有效的记录 ID" >&2
@@ -63,7 +63,7 @@ get_current_record_id() {
 
     if [ ${#id} -ne 36 ]; then
         # 尝试从云端获取记录
-        id=$(cocli record list | grep "$NAMING_PATTERN" | awk '{print $1}' | head -n 1)  # 使用 NAMING_PATTERN
+        id=$(cocli record list | grep "$NAMING_PATTERN" | awk '{print $1}' | head -n 1)
 
         if [ ${#id} -eq 36 ]; then
             # 如果从云端找到了有效的ID，将其写入本地记录
