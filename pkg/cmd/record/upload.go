@@ -88,9 +88,10 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 				log.Fatalf("unable to generate security token: %v", err)
 			}
 			mc, err := minio.New(generateSecurityTokenRes.Endpoint, &minio.Options{
-				Creds:  credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-				Secure: true,
-				Region: "",
+				Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
+				Secure:    true,
+				Region:    "",
+				Transport: cmd_utils.DefaultTransport,
 			})
 			if err != nil {
 				log.Fatalf("unable to create minio client: %v", err)

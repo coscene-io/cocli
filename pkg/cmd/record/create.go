@@ -90,8 +90,9 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 				}
 
 				mc, err := minio.New(pm.GetCurrentProfile().EndPoint, &minio.Options{
-					Creds:  credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-					Secure: true,
+					Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
+					Secure:    true,
+					Transport: cmd_utils.DefaultTransport,
 				})
 				if err != nil {
 					log.Fatalf("unable to create minio client: %v", err)
