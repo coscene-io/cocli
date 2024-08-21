@@ -333,7 +333,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 
 upload:
 	for {
-		if curPart > totalPartsCount {
+		if uploadingParts.Len() == 0 {
 			break upload
 		}
 		select {
