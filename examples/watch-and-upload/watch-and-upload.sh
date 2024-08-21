@@ -35,7 +35,7 @@ fi
 # 定义日志文件
 UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
 RECORD_LOGS="$HOME/.RECORD_LOGS"
-NAMING_PATTERN="auto-upload-upload2-$(date +'%Y-%m-%d-%H')"
+NAMING_PATTERN="auto-upload-$(date +'%Y-%m-%d-%H')"
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
