@@ -142,7 +142,6 @@ main() {
         "$WATCH_DIR" | while read -d "" event; do
 
         event=$(realpath -s "$event")
-        echo "$event"
         if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
             echo "正在处理 $event"
             process_file "$event"
