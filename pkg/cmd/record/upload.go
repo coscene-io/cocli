@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"time"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	"github.com/coscene-io/cocli/api"
@@ -45,6 +46,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 		includeHidden = false
 		projectSlug   = ""
 		multiOpts     = &upload_utils.MultipartOpts{}
+		timeout       time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -91,7 +93,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 				Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
 				Secure:    true,
 				Region:    "",
-				Transport: cmd_utils.DefaultTransport,
+				Transport: cmd_utils.NewTransport(timeout),
 			})
 			if err != nil {
 				log.Fatalf("unable to create minio client: %v", err)
@@ -145,6 +147,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
 	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
 	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd
 }

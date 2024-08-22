@@ -17,6 +17,7 @@ package record
 import (
 	"context"
 	"fmt"
+	"time"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	"github.com/coscene-io/cocli/internal/config"
@@ -37,6 +38,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 		labelDisplayNames []string
 		thumbnail         = ""
 		multiOpts         = &upload_utils.MultipartOpts{}
+		timeout           time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -92,7 +94,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 				mc, err := minio.New(pm.GetCurrentProfile().EndPoint, &minio.Options{
 					Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
 					Secure:    true,
-					Transport: cmd_utils.DefaultTransport,
+					Transport: cmd_utils.NewTransport(timeout),
 				})
 				if err != nil {
 					log.Fatalf("unable to create minio client: %v", err)
@@ -118,6 +120,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringVarP(&thumbnail, "thumbnail", "i", "", "thumbnail path of the record.")
 	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
 	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd
 }
