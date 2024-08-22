@@ -48,3 +48,22 @@ func (h *IntHeap) Remove(x any) {
 	}
 	heap.Init(h)
 }
+
+// FindMinMissingInteger finds the minimum missing integer in a sorted array
+func FindMinMissingInteger(arr []int) int {
+	left, right := 0, len(arr)
+
+	for left < right {
+		mid := (left + right) / 2
+
+		// Check if arr[mid] is equal to the expected value mid + 1
+		if arr[mid] == mid+1 {
+			left = mid + 1
+		} else {
+			right = mid
+		}
+	}
+
+	// The first missing number is left + 1
+	return left + 1
+}

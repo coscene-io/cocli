@@ -22,10 +22,7 @@ import (
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -86,26 +83,12 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 				}
 
 				fmt.Println("Uploading thumbnail to pre-signed url...")
-				generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
+				um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
 				if err != nil {
-					log.Fatalf("unable to generate security token: %v", err)
+					log.Fatalf("unable to create upload manager: %v", err)
 				}
 
-				mc, err := minio.New(pm.GetCurrentProfile().EndPoint, &minio.Options{
-					Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-					Secure:    true,
-					Transport: cmd_utils.NewTransport(timeout),
-				})
-				if err != nil {
-					log.Fatalf("unable to create minio client: %v", err)
-				}
-
-				um, err := upload_utils.NewUploadManager(mc, multiOpts)
-				if err != nil {
-					log.Fatalf("Failed to create upload manager: %v", err)
-				}
-
-				err = cmd_utils.UploadFileThroughUrl(um, thumbnail, thumbnailUploadUrl)
+				err = um.UploadFileThroughUrl(thumbnail, thumbnailUploadUrl)
 				if err != nil {
 					log.Fatalf("Failed to upload thumbnail: %v", err)
 				}
