@@ -138,7 +138,7 @@ func (m *UploadStatusMonitor) View() string {
 			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Upload failed")
 		case UploadInProgress:
 			progress := m.calculateUploadProgress(k)
-			barWidth := max(m.windowWidth-len(k)-12, 10)                // Adjust for label and percentage, make sure it is at least 10
+			barWidth := max(m.windowWidth-len(k)-12, 10)                        // Adjust for label and percentage, make sure it is at least 10
 			progressCount := min(int(progress*float64(barWidth)/100), barWidth) // min used to prevent float rounding errors
 			emptyBar := strings.Repeat("-", barWidth-progressCount)
 			progressBar := strings.Repeat("█", progressCount)
