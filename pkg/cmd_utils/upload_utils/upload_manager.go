@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/coscene-io/cocli/internal/config"
+	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/coscene-io/cocli/internal/name"
 	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -26,7 +27,6 @@ import (
 	"mime"
 	"net/url"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -39,17 +39,16 @@ import (
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	log "github.com/sirupsen/logrus"
-	"github.com/syndtr/goleveldb/leveldb"
 	"golang.org/x/exp/slices"
 )
 
 const (
-	uploadIdKeyTemplate     = "STORE-KEY-UPLOAD-ID-%s"
-	uploadedSizeKeyTemplate = "STORE-KEY-UPLOADED-SIZE-%s"
-	partsKeyTemplate        = "STORE-KEY-PARTS-%s"
-	maxSinglePutObjectSize  = 1024 * 1024 * 1024 * 500 // 500GiB
-	defaultWindowSize       = 1024 * 1024 * 1024       // 1GiB
-	uploadDBRelativePath    = ".cocli.uploader.db"
+	userTagRecordIdKey     = "X-COS-RECORD-ID"
+	uploadIdKey            = "STORE-KEY-UPLOAD-ID"
+	uploadedSizeKey        = "STORE-KEY-UPLOADED-SIZE"
+	partsKey               = "STORE-KEY-PARTS"
+	maxSinglePutObjectSize = 1024 * 1024 * 1024 * 500 // 500GiB
+	defaultWindowSize      = 1024 * 1024 * 1024       // 1GiB
 )
 
 // FileInfo contains the path, size and sha256 of a file.
@@ -63,7 +62,6 @@ type FileInfo struct {
 // Note that it's user's responsibility to check the Errs field after Wait() to see if there's any error.
 type UploadManager struct {
 	opts                    *MultipartOpts
-	db                      *leveldb.DB
 	client                  *minio.Client
 	uploadProgressChan      chan UpdateStatusMsg
 	statusMonitorDoneSignal *sync.WaitGroup
@@ -92,21 +90,9 @@ func NewUploadManagerFromConfig(pm *config.ProfileManager, proj *name.Project, t
 }
 
 func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager, error) {
-	// init db
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return nil, errors.Wrap(err, "Get current user home dir failed")
-	}
-
-	uploadDB, err := leveldb.OpenFile(path.Join(homeDir, uploadDBRelativePath), nil)
-	if err != nil {
-		return nil, errors.Wrap(err, "Open level db failed")
-	}
-
 	um := &UploadManager{
 		opts:                    opts,
 		uploadProgressChan:      make(chan UpdateStatusMsg, 10),
-		db:                      uploadDB,
 		client:                  client,
 		statusMonitorDoneSignal: new(sync.WaitGroup),
 		isDebug:                 log.GetLevel() == log.DebugLevel,
@@ -234,7 +220,7 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 
 		if fileInfo.Size > int64(size) {
 			err = um.FMultipartPutObject(context.Background(), bucket, key,
-				absPath, fileInfo.Size, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
+				absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
 		} else {
 			progress := &uploadProgressReader{
 				absPath:            absPath,
@@ -251,7 +237,7 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 	}()
 }
 
-func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, key string, filePath string, fileSize int64, opts minio.PutObjectOptions) (err error) {
+func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string, key string, filePath string, fileSize int64, fileSha256 string, opts minio.PutObjectOptions) (err error) {
 	// Check for largest object size allowed.
 	if fileSize > int64(maxSinglePutObjectSize) {
 		return errors.Errorf("Your proposed upload size ‘%d’ exceeds the maximum allowed object size ‘%d’ for single PUT operation.", fileSize, maxSinglePutObjectSize)
@@ -259,11 +245,22 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 
 	c := minio.Core{Client: um.client}
 
+	// Create uploader directory if not exists
+	if err = os.MkdirAll(constants.DefaultUploaderDirPath, 0755); err != nil {
+		return errors.Wrap(err, "Create uploader directory failed")
+	}
+
+	// Create uploader db
+	db, err := NewUploadDB(filePath, opts.UserTags[userTagRecordIdKey], fileSha256)
+	if err != nil {
+		return errors.Wrap(err, "Create uploader db failed")
+	}
+	defer db.Close()
+
 	// ----------------- Start fetching previous upload info from db -----------------
 	// Fetch upload id. If not found, initiate a new multipart upload.
 	var uploadId string
-	uploadIdKey := fmt.Sprintf(uploadIdKeyTemplate, filePath)
-	uploadIdBytes, err := um.db.Get([]byte(uploadIdKey), nil)
+	uploadIdBytes, err := db.Get(uploadIdKey)
 	if err != nil {
 		um.Debugf("Get upload id by: %s warn: %v", uploadIdKey, err)
 	}
@@ -291,8 +288,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 
 	// Fetch uploaded size
 	var uploadedSize int64
-	uploadedSizeKey := fmt.Sprintf(uploadedSizeKeyTemplate, filePath)
-	uploadedSizeBytes, err := um.db.Get([]byte(uploadedSizeKey), nil)
+	uploadedSizeBytes, err := db.Get(uploadedSizeKey)
 	if err != nil {
 		um.Debugf("Get uploaded size by: %s warn: %v", uploadedSizeKey, err)
 	}
@@ -309,8 +305,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 
 	// Fetch uploaded parts
 	var parts []minio.CompletePart
-	partsKey := fmt.Sprintf(partsKeyTemplate, filePath)
-	partsBytes, err := um.db.Get([]byte(partsKey), nil)
+	partsBytes, err := db.Get(partsKey)
 	if err != nil {
 		um.Debugf("Get uploaded parts by: %s warn: %v", partsKey, err)
 	}
@@ -472,12 +467,12 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 			if err != nil {
 				return errors.Wrapf(err, "Marshal parts failed")
 			}
-			batch := new(leveldb.Batch)
-			batch.Put([]byte(uploadIdKey), []byte(uploadId))
-			batch.Put([]byte(partsKey), partsJsonBytes)
-			batch.Put([]byte(uploadedSizeKey), []byte(strconv.FormatInt(uploadedSize, 10)))
-			err = um.db.Write(batch, nil)
-			if err != nil {
+			batch := map[string][]byte{
+				uploadIdKey:     []byte(uploadId),
+				partsKey:        partsJsonBytes,
+				uploadedSizeKey: []byte(strconv.FormatInt(uploadedSize, 10)),
+			}
+			if err = db.BatchPut(batch); err != nil {
 				return errors.Wrapf(err, "Batch write parts failed")
 			}
 			completedPartsCh <- uploadRes.Part.PartNumber
@@ -501,13 +496,8 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		return errors.Wrapf(err, "Complete multipart upload failed")
 	}
 
-	batchDelete := new(leveldb.Batch)
-	batchDelete.Delete([]byte(uploadIdKey))
-	batchDelete.Delete([]byte(partsKey))
-	batchDelete.Delete([]byte(uploadedSizeKey))
-	err = um.db.Write(batchDelete, nil)
-	if err != nil {
-		return errors.Wrapf(err, "Batch delete parts failed")
+	if err = db.Delete(); err != nil {
+		return errors.Wrap(err, "Delete db failed")
 	}
 	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Status: UploadCompleted})
 

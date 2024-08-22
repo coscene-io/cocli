@@ -42,7 +42,8 @@ const (
 )
 
 var (
-	DefaultConfigPath = defaultConfigPath()
+	DefaultConfigPath      = defaultConfigPath()
+	DefaultUploaderDirPath = defaultUploaderDirPath()
 )
 
 func defaultConfigPath() string {
@@ -51,4 +52,12 @@ func defaultConfigPath() string {
 		log.Fatalf("unable to read current user home")
 	}
 	return path.Join(homedir, ConfigFilename)
+}
+
+func defaultUploaderDirPath() string {
+	homedir, err := os.UserHomeDir()
+	if err != nil {
+		log.Fatalf("unable to read current user home")
+	}
+	return path.Join(homedir, ".cache", "cocli")
 }
