@@ -18,13 +18,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/coscene-io/cocli/internal/config"
+	"github.com/coscene-io/cocli/internal/name"
+	"github.com/coscene-io/cocli/pkg/cmd_utils"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"io"
 	"mime"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -66,6 +72,23 @@ type UploadManager struct {
 	FileInfos               map[string]FileInfo
 	Errs                    map[string]error
 	sync.WaitGroup
+}
+
+func NewUploadManagerFromConfig(pm *config.ProfileManager, proj *name.Project, timeout time.Duration, multiOpts *MultipartOpts) (*UploadManager, error) {
+	generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to generate security token")
+	}
+	mc, err := minio.New(generateSecurityTokenRes.Endpoint, &minio.Options{
+		Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
+		Secure:    true,
+		Region:    "",
+		Transport: cmd_utils.NewTransport(timeout),
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "unable to create minio client")
+	}
+	return NewUploadManager(mc, multiOpts)
 }
 
 func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager, error) {
@@ -154,6 +177,38 @@ func (um *UploadManager) PrintErrs() {
 		}
 		return
 	}
+}
+
+// UploadFileThroughUrl uploads a single file to the given uploadUrl.
+// um is the upload manager to use.
+// file is the absolute path of the file to be uploaded.
+// uploadUrl is the pre-signed url to upload the file to.
+func (um *UploadManager) UploadFileThroughUrl(file string, uploadUrl string) error {
+	parsedUrl, err := url.Parse(uploadUrl)
+	if err != nil {
+		return errors.Wrap(err, "parse upload url failed")
+	}
+
+	// Parse tags
+	tagsMap, err := url.ParseQuery(parsedUrl.Query().Get("X-Amz-Tagging"))
+	if err != nil {
+		return errors.Wrap(err, "parse tags failed")
+	}
+	tags := lo.MapValues(tagsMap, func(value []string, _ string) string {
+		if len(value) == 0 {
+			return ""
+		}
+		return value[0]
+	})
+
+	// Parse bucket and key
+	if !strings.HasPrefix(parsedUrl.Path, "/default/") {
+		return errors.New("invalid upload url")
+	}
+	key := strings.TrimPrefix(parsedUrl.Path, "/default/")
+
+	um.FPutObject(file, "default", key, tags)
+	return nil
 }
 
 // FPutObject uploads a file to a bucket with a key and sha256.

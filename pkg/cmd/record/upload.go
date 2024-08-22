@@ -27,10 +27,7 @@ import (
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/fs"
 	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -85,20 +82,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Uploading files to record: %s\n", recordName.RecordID)
 
 			// create minio client and upload manager first.
-			generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
-			if err != nil {
-				log.Fatalf("unable to generate security token: %v", err)
-			}
-			mc, err := minio.New(generateSecurityTokenRes.Endpoint, &minio.Options{
-				Creds:     credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-				Secure:    true,
-				Region:    "",
-				Transport: cmd_utils.NewTransport(timeout),
-			})
-			if err != nil {
-				log.Fatalf("unable to create minio client: %v", err)
-			}
-			um, err := upload_utils.NewUploadManager(mc, multiOpts)
+			um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -117,7 +101,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 
 					fileAbsolutePath := path.Join(relativeDir, fileResource.Filename)
 
-					if err = cmd_utils.UploadFileThroughUrl(um, fileAbsolutePath, uploadUrl); err != nil {
+					if err = um.UploadFileThroughUrl(fileAbsolutePath, uploadUrl); err != nil {
 						um.AddErr(fileAbsolutePath, errors.Wrapf(err, "unable to upload file"))
 						continue
 					}

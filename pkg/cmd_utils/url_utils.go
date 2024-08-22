@@ -16,17 +16,11 @@ package cmd_utils
 
 import (
 	"fmt"
+	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
-
-	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
-	"github.com/pkg/errors"
-	"github.com/samber/lo"
-	log "github.com/sirupsen/logrus"
 )
 
 // Progress is a simple struct to keep track of the progress of a file upload/download
@@ -54,38 +48,6 @@ func (pr *Progress) Print() {
 		return
 	}
 	fmt.Printf("\r%s: %d/%d %d%%", pr.PrintPrefix, pr.BytesRead, pr.TotalSize, 100*pr.BytesRead/pr.TotalSize)
-}
-
-// UploadFileThroughUrl uploads a single file to the given uploadUrl.
-// um is the upload manager to use.
-// file is the absolute path of the file to be uploaded.
-// uploadUrl is the pre-signed url to upload the file to.
-func UploadFileThroughUrl(um *upload_utils.UploadManager, file string, uploadUrl string) error {
-	parsedUrl, err := url.Parse(uploadUrl)
-	if err != nil {
-		return errors.Wrap(err, "parse upload url failed")
-	}
-
-	// Parse tags
-	tagsMap, err := url.ParseQuery(parsedUrl.Query().Get("X-Amz-Tagging"))
-	if err != nil {
-		return errors.Wrap(err, "parse tags failed")
-	}
-	tags := lo.MapValues(tagsMap, func(value []string, _ string) string {
-		if len(value) == 0 {
-			return ""
-		}
-		return value[0]
-	})
-
-	// Parse bucket and key
-	if !strings.HasPrefix(parsedUrl.Path, "/default/") {
-		return errors.New("invalid upload url")
-	}
-	key := strings.TrimPrefix(parsedUrl.Path, "/default/")
-
-	um.FPutObject(file, "default", key, tags)
-	return nil
 }
 
 // DownloadFileThroughUrl downloads a single file from the given downloadUrl.
