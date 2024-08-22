@@ -20,16 +20,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"time"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	"github.com/coscene-io/cocli/api"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/fs"
 	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -44,6 +42,8 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 		isRecursive   = false
 		includeHidden = false
 		projectSlug   = ""
+		multiOpts     = &upload_utils.MultipartOpts{}
+		timeout       time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -82,19 +82,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Uploading files to record: %s\n", recordName.RecordID)
 
 			// create minio client and upload manager first.
-			generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
-			if err != nil {
-				log.Fatalf("unable to generate security token: %v", err)
-			}
-			mc, err := minio.New(generateSecurityTokenRes.Endpoint, &minio.Options{
-				Creds:  credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-				Secure: true,
-				Region: "",
-			})
-			if err != nil {
-				log.Fatalf("unable to create minio client: %v", err)
-			}
-			um, err := upload_utils.NewUploadManager(mc)
+			um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -113,7 +101,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 
 					fileAbsolutePath := path.Join(relativeDir, fileResource.Filename)
 
-					if err = cmd_utils.UploadFileThroughUrl(um, fileAbsolutePath, uploadUrl); err != nil {
+					if err = um.UploadFileThroughUrl(fileAbsolutePath, uploadUrl); err != nil {
 						um.AddErr(fileAbsolutePath, errors.Wrapf(err, "unable to upload file"))
 						continue
 					}
@@ -121,13 +109,6 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			}
 
 			um.Wait()
-			if len(um.Errs) > 0 {
-				fmt.Printf("\n%d files failed to upload\n", len(um.Errs))
-				for kPath, vErr := range um.Errs {
-					fmt.Printf("Upload %v failed with: \n%v\n\n", kPath, vErr)
-				}
-				return
-			}
 
 			recordUrl, err := pm.GetRecordUrl(recordName)
 			if err == nil {
@@ -141,6 +122,9 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().BoolVarP(&isRecursive, "recursive", "R", false, "upload files in the current directory recursively")
 	cmd.Flags().BoolVarP(&includeHidden, "include-hidden", "H", false, "include hidden files (\"dot\" files) in the upload")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
+	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
+	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd
 }

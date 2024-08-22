@@ -32,13 +32,23 @@ import (
 )
 
 func NewCommand() *cobra.Command {
-	cfgPath := ""
+	var (
+		cfgPath  string
+		logLevel string
+	)
 
 	cmd := &cobra.Command{
 		Use:     constants.CLIName,
 		Short:   "",
 		Version: cocli.GetVersion(),
 		PersistentPreRun: func(cmd *cobra.Command, args []string) {
+			log.SetLevel(log.DebugLevel)
+			level, err := log.ParseLevel(logLevel)
+			if err != nil {
+				log.Fatalf("Log level is invalid, should one of trace|debug|info|warn|error.")
+			}
+			log.SetLevel(level)
+
 			// check if cfgPath exists and isFile
 			cfgPathInfo, err := os.Stat(cfgPath)
 
@@ -90,6 +100,7 @@ func NewCommand() *cobra.Command {
 	}
 
 	cmd.PersistentFlags().StringVar(&cfgPath, "config", constants.DefaultConfigPath, "config file path")
+	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level, one of: trace|debug|info|warn|error")
 
 	cmd.AddCommand(NewCompletionCommand())
 	cmd.AddCommand(action.NewRootCommand(&cfgPath))

@@ -17,14 +17,12 @@ package record
 import (
 	"context"
 	"fmt"
+	"time"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +34,8 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 		projectSlug       = ""
 		labelDisplayNames []string
 		thumbnail         = ""
+		multiOpts         = &upload_utils.MultipartOpts{}
+		timeout           time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -83,25 +83,12 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 				}
 
 				fmt.Println("Uploading thumbnail to pre-signed url...")
-				generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
+				um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
 				if err != nil {
-					log.Fatalf("unable to generate security token: %v", err)
+					log.Fatalf("unable to create upload manager: %v", err)
 				}
 
-				mc, err := minio.New(pm.GetCurrentProfile().EndPoint, &minio.Options{
-					Creds:  credentials.NewStaticV4(generateSecurityTokenRes.GetAccessKeyId(), generateSecurityTokenRes.GetAccessKeySecret(), generateSecurityTokenRes.GetSessionToken()),
-					Secure: true,
-				})
-				if err != nil {
-					log.Fatalf("unable to create minio client: %v", err)
-				}
-
-				um, err := upload_utils.NewUploadManager(mc)
-				if err != nil {
-					log.Fatalf("Failed to create upload manager: %v", err)
-				}
-
-				err = cmd_utils.UploadFileThroughUrl(um, thumbnail, thumbnailUploadUrl)
+				err = um.UploadFileThroughUrl(thumbnail, thumbnailUploadUrl)
 				if err != nil {
 					log.Fatalf("Failed to upload thumbnail: %v", err)
 				}
@@ -114,6 +101,9 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringSliceVarP(&labelDisplayNames, "labels", "l", []string{}, "labels of the record.")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
 	cmd.Flags().StringVarP(&thumbnail, "thumbnail", "i", "", "thumbnail path of the record.")
+	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
+	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd
 }

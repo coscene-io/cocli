@@ -16,7 +16,6 @@ package upload_utils
 
 import (
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -38,10 +37,11 @@ type UploadStatusMonitor struct {
 	// startSignal is used to signal the upload status monitor has finished initialization
 	startSignal *sync.WaitGroup
 
-	EscapeExit bool
+	ManualQuit bool
 }
 
 func NewUploadStatusMonitor(startSignal *sync.WaitGroup) *UploadStatusMonitor {
+	startSignal.Add(1)
 	return &UploadStatusMonitor{
 		uploadStatusMap: make(map[string]*uploadStatus),
 		orderedFileList: []string{},
@@ -55,7 +55,11 @@ type AddFileMsg struct {
 	Name string
 }
 
-func (msg *AddFileMsg) UpdateStatus(m *UploadStatusMonitor) {
+type CanUpdateStatus interface {
+	UpdateStatus(m *UploadStatusMonitor)
+}
+
+func (msg AddFileMsg) UpdateStatus(m *UploadStatusMonitor) {
 	m.orderedFileList = append(m.orderedFileList, msg.Name)
 	m.uploadStatusMap[msg.Name] = &uploadStatus{
 		total:    0,
@@ -71,12 +75,12 @@ type UpdateStatusMsg struct {
 	Status   UploadStatusEnum
 }
 
-func (msg *UpdateStatusMsg) UpdateStatus(m *UploadStatusMonitor) {
+func (msg UpdateStatusMsg) UpdateStatus(m *UploadStatusMonitor) {
 	if msg.Total > 0 {
 		m.uploadStatusMap[msg.Name].total = msg.Total
 	}
 	if msg.Uploaded > 0 {
-		m.uploadStatusMap[msg.Name].uploaded = msg.Uploaded
+		m.uploadStatusMap[msg.Name].uploaded += msg.Uploaded
 	}
 	if msg.Status != Unprocessed {
 		m.uploadStatusMap[msg.Name].status = msg.Status
@@ -98,16 +102,15 @@ func (m *UploadStatusMonitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
-	case AddFileMsg:
-		msg.UpdateStatus(m)
-	case UpdateStatusMsg:
+	case CanUpdateStatus:
 		msg.UpdateStatus(m)
 	case tea.QuitMsg:
 		return m, tea.Quit
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEscape, tea.KeyCtrlD:
-			os.Exit(1)
+			m.ManualQuit = true
+			return m, tea.Quit
 		}
 	}
 	return m, nil
