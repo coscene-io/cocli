@@ -274,6 +274,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		//if err != nil {
 		//	return errors.Wrap(err, "List multipart uploads failed")
 		//}
+		//um.StatusMonitor.Println("uploads: ", uploads)
 		//if !lo.ContainsBy(uploads.Uploads, func(u minio.ObjectMultipartInfo) bool {
 		//	return u.UploadID == uploadId
 		//}) {
@@ -376,7 +377,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 				case partNumber := <-completedPartsCh:
 					uploadingParts.Remove(partNumber)
 					minPart = uploadingParts.Peek()
-					//um.StatusMonitor.Println("received part: ", partNumber)
+					um.Debugf("completed part received: %d", partNumber)
 				default:
 				}
 			}
@@ -384,7 +385,7 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 			// Upload parts in window.
 			for curPart <= totalPartsCount && curPart < minPart+windowSize/int(partSize) {
 				if !slices.Contains(partNumbers, curPart) {
-					//um.StatusMonitor.Println("sending part: ", curPart)
+					um.Debugf("sending part to be uploaded: %d", curPart)
 					uploadingParts.Push(curPart)
 					uploadPartsCh <- curPart
 				}
