@@ -63,7 +63,6 @@ type FileInfo struct {
 type UploadManager struct {
 	opts                    *MultipartOpts
 	client                  *minio.Client
-	uploadProgressChan      chan UpdateStatusMsg
 	statusMonitorDoneSignal *sync.WaitGroup
 	StatusMonitor           *tea.Program
 	isDebug                 bool
@@ -92,7 +91,6 @@ func NewUploadManagerFromConfig(pm *config.ProfileManager, proj *name.Project, t
 func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager, error) {
 	um := &UploadManager{
 		opts:                    opts,
-		uploadProgressChan:      make(chan UpdateStatusMsg, 10),
 		client:                  client,
 		statusMonitorDoneSignal: new(sync.WaitGroup),
 		isDebug:                 log.GetLevel() == log.DebugLevel,
@@ -107,7 +105,6 @@ func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager
 	go um.runUploadStatusMonitor()
 	statusMonitorStartSignal.Wait()
 
-	go um.handleUploadProgress()
 	return um, nil
 }
 
@@ -127,13 +124,6 @@ func (um *UploadManager) runUploadStatusMonitor() {
 	um.PrintErrs()
 	if finalModel.(*UploadStatusMonitor).ManualQuit {
 		log.Fatalf("Upload status monitor quit manually")
-	}
-}
-
-func (um *UploadManager) handleUploadProgress() {
-	for {
-		progress := <-um.uploadProgressChan
-		um.StatusMonitor.Send(progress)
 	}
 }
 
@@ -223,8 +213,8 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 				absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
 		} else {
 			progress := &uploadProgressReader{
-				absPath:            absPath,
-				uploadProgressChan: um.uploadProgressChan,
+				absPath: absPath,
+				monitor: um.StatusMonitor,
 			}
 			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
 			_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
@@ -424,9 +414,9 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 				}
 
 				sectionReader := &uploadProgressSectionReader{
-					SectionReader:      io.NewSectionReader(fileReader, readOffset, curPartSize),
-					uploadProgressChan: um.uploadProgressChan,
-					absPath:            filePath,
+					SectionReader: io.NewSectionReader(fileReader, readOffset, curPartSize),
+					monitor:       um.StatusMonitor,
+					absPath:       filePath,
 				}
 				um.Debugf("Uploading part: %d", partToUpload)
 				objPart, err := c.PutObjectPart(ctx, bucket, key, uploadId, partToUpload, sectionReader, curPartSize, minio.PutObjectPartOptions{SSE: opts.ServerSideEncryption})
@@ -509,17 +499,15 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
-	absPath            string
-	uploaded           int64
-	uploadProgressChan chan UpdateStatusMsg
+	absPath  string
+	uploaded int64
+	monitor  *tea.Program
 }
 
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n := int64(len(b))
 	r.uploaded += n
-
-	updateMsg := UpdateStatusMsg{Name: r.absPath, Uploaded: n}
-	r.uploadProgressChan <- updateMsg
+	r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: n})
 	return int(n), nil
 }
 
@@ -532,12 +520,12 @@ type uploadedPartRes struct {
 // uploadProgressSectionReader is a SectionReader that also sends progress updates to a channel.
 type uploadProgressSectionReader struct {
 	*io.SectionReader
-	uploadProgressChan chan UpdateStatusMsg
-	absPath            string
+	absPath string
+	monitor *tea.Program
 }
 
 func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
-	r.uploadProgressChan <- UpdateStatusMsg{Name: r.absPath, Uploaded: int64(n), Status: UploadInProgress}
+	r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: int64(n), Status: UploadInProgress})
 	return n, err
 }
