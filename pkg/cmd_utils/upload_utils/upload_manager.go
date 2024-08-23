@@ -208,18 +208,18 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 			return
 		}
 
-		if fileInfo.Size > int64(size) {
-			err = um.FMultipartPutObject(context.Background(), bucket, key,
-				absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
-		} else {
-			progress := &uploadProgressReader{
-				absPath: absPath,
-				monitor: um.StatusMonitor,
-			}
-			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
-			_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
-				minio.PutObjectOptions{Progress: progress, UserTags: userTags})
-		}
+		//if fileInfo.Size > int64(size) {
+		err = um.FMultipartPutObject(context.Background(), bucket, key,
+			absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
+		//} else {
+		//	progress := &uploadProgressReader{
+		//		absPath: absPath,
+		//		monitor: um.StatusMonitor,
+		//	}
+		//	um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
+		//	_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
+		//		minio.PutObjectOptions{Progress: progress, UserTags: userTags})
+		//}
 		if err != nil {
 			um.AddErr(absPath, err)
 		} else {
