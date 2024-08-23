@@ -35,6 +35,13 @@ fi
 # 定义日志文件
 UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
 RECORD_LOGS="$HOME/.RECORD_LOGS"
+
+# 设置延迟时间（秒）
+LATENCY=60
+
+# 使用关联数组来跟踪最后处理的时间戳
+declare -A last_processed
+
 get_naming_pattern() {
     echo "auto-upload-$(date +'%Y-%m-%d-%H')"
 }
@@ -83,7 +90,7 @@ get_current_record_id() {
 }
 
 # 处理新文件
-process_file() {
+upload_file() {
     local file="$1"
     file=$(realpath -s "$file")
     [ ! -f "$file" ] && return
@@ -122,7 +129,7 @@ function search_files() {
         elif [ -f "$file" ]; then
             # 如果是文件，检查后缀
             if [[ "$file" == *".log" ]]; then
-                process_file "$file"
+                upload_file "$file"
             fi
         fi
     done
@@ -135,22 +142,45 @@ initialize() {
     echo "初始化完成。"
 }
 
+
+# fswatch 本身因为实现问题会反复触发文件事件
+# 本脚本只关心最新状态，debounce 掉重复信息
+# 在 latency 窗口内只处理一次
+process_event() {
+    local file="$1"
+    local current_time=$(date +%s)
+
+    # 检查文件是否最近被处理过
+    if [[ -v last_processed[$file] ]]; then
+        local time_diff=$((current_time - ${last_processed[$file]}))
+        if [[ $time_diff -lt $LATENCY ]]; then
+            return
+        fi
+    fi
+
+    # 更新最后处理时间
+    last_processed[$file]=$current_time
+
+    # 处理文件
+    if [ -f "$file" ] && [[ "$(basename "$file")" != .* ]] && [[ "$file" == *".log" ]]; then
+        echo "正在处理 $file"
+        upload_file "$file"
+    fi
+}
+
 main() {
     echo "开始初始化..."
     initialize
 
     echo "开始监控目录: $WATCH_DIR"
     fswatch --event Created --event Updated --event MovedTo -0 -r \
-        --latency=60 \
+        --latency=$LATENCY \
         -e "(/|^)\.[^/]*$" \
         -e "/sed.*\.tmp$" \
         "$WATCH_DIR" | while read -d "" event; do
 
         event=$(realpath -s "$event")
-        if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
-            echo "正在处理 $event"
-            process_file "$event"
-        fi
+        process_event "$event"
     done
 }
 
