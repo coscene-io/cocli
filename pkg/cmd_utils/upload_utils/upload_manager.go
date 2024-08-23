@@ -224,7 +224,6 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 		} else {
 			progress := &uploadProgressReader{
 				absPath:            absPath,
-				total:              fileInfo.Size,
 				uploadProgressChan: um.uploadProgressChan,
 			}
 			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
@@ -233,6 +232,8 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 		}
 		if err != nil {
 			um.AddErr(absPath, err)
+		} else {
+			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadCompleted})
 		}
 	}()
 }
@@ -369,7 +370,14 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 					return
 				case partNumber := <-completedPartsCh:
 					uploadingParts.Remove(partNumber)
-					minPart = uploadingParts.Peek()
+					if uploadingParts.Len() == 0 {
+						// Handle the case when partNumber is the last part.
+						// In this case, it means that all other parts in the window are uploaded.
+						// We thus need to update the minPart to the immediate next part outside the window.
+						minPart = partNumber + windowSize/int(partSize)
+					} else {
+						minPart = uploadingParts.Peek()
+					}
 					um.Debugf("completed part received: %d", partNumber)
 				}
 			}
@@ -496,7 +504,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	if err = db.Delete(); err != nil {
 		return errors.Wrap(err, "Delete db failed")
 	}
-	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Status: UploadCompleted})
 
 	return nil
 }
@@ -504,7 +511,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
 	absPath            string
-	total              int64
 	uploaded           int64
 	uploadProgressChan chan UpdateStatusMsg
 }
@@ -514,9 +520,6 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	r.uploaded += n
 
 	updateMsg := UpdateStatusMsg{Name: r.absPath, Uploaded: n}
-	if r.uploaded == r.total {
-		updateMsg.Status = UploadCompleted
-	}
 	r.uploadProgressChan <- updateMsg
 	return int(n), nil
 }
