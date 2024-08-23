@@ -105,7 +105,7 @@ func NewUploadManager(client *minio.Client, hideMonitor bool, opts *MultipartOpt
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
 	statusMonitorStartSignal := new(sync.WaitGroup)
 	um.statusMonitorDoneSignal.Add(1)
-	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(2))
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(1))
 	go um.runUploadStatusMonitor()
 	statusMonitorStartSignal.Wait()
 
@@ -528,7 +528,7 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n := int64(len(b))
 	r.uploaded += n
 	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/100 || r.uploaded == r.total {
+		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
 			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint})
 			r.prevUploadedCheckpoint = r.uploaded
 		}
@@ -556,7 +556,7 @@ func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
 	r.uploaded += int64(n)
 	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/100 || r.uploaded == r.total {
+		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
 			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint, Status: UploadInProgress})
 			r.prevUploadedCheckpoint = r.uploaded
 		}
