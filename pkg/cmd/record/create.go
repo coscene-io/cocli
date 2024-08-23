@@ -83,7 +83,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 				}
 
 				fmt.Println("Uploading thumbnail to pre-signed url...")
-				um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
+				um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, true, multiOpts)
 				if err != nil {
 					log.Fatalf("unable to create upload manager: %v", err)
 				}

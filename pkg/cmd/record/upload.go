@@ -44,6 +44,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 		projectSlug   = ""
 		multiOpts     = &upload_utils.MultipartOpts{}
 		timeout       time.Duration
+		hideMonitor   = false
 	)
 
 	cmd := &cobra.Command{
@@ -82,7 +83,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Uploading files to record: %s\n", recordName.RecordID)
 
 			// create minio client and upload manager first.
-			um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, multiOpts)
+			um, err := upload_utils.NewUploadManagerFromConfig(pm, proj, timeout, hideMonitor, multiOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -125,6 +126,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
 	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
+	cmd.Flags().BoolVar(&hideMonitor, "hide-monitor", false, "hide the upload status monitor")
 
 	return cmd
 }
@@ -135,7 +137,7 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 		defer close(ret)
 		var files []*openv1alpha1resource.File
 		for f := range filesGenerator {
-			um.StatusMonitor.Send(upload_utils.AddFileMsg{
+			um.UpdateMonitor(upload_utils.AddFileMsg{
 				Name: f,
 			})
 			checksum, size, err := fs.CalSha256AndSize(f)
@@ -148,7 +150,7 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 				Size:   size,
 				Sha256: checksum,
 			}
-			um.StatusMonitor.Send(upload_utils.UpdateStatusMsg{
+			um.UpdateMonitor(upload_utils.UpdateStatusMsg{
 				Name:  f,
 				Total: size,
 			})
@@ -166,7 +168,7 @@ func generateUploadUrlBatches(fileClient api.FileInterface, filesGenerator <-cha
 				Filename:  relativePath,
 			}.String())
 			if err == nil && getFileRes.Sha256 == checksum && getFileRes.Size == size {
-				um.StatusMonitor.Send(upload_utils.UpdateStatusMsg{
+				um.UpdateMonitor(upload_utils.UpdateStatusMsg{
 					Name:   f,
 					Status: upload_utils.PreviouslyUploaded,
 				})
