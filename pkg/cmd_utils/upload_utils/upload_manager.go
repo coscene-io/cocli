@@ -266,17 +266,15 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	}
 	if uploadIdBytes != nil {
 		uploadId = string(uploadIdBytes)
-		// todo(shuhao): Check if the upload id is still valid.
-		//uploads, err := c.ListMultipartUploads(ctx, bucket, key, "", "", "/", 2000)
-		//if err != nil {
-		//	return errors.Wrap(err, "List multipart uploads failed")
-		//}
-		//um.StatusMonitor.Println("uploads: ", uploads)
-		//if !lo.ContainsBy(uploads.Uploads, func(u minio.ObjectMultipartInfo) bool {
-		//	return u.UploadID == uploadId
-		//}) {
-		//	uploadId = ""
-		//}
+		result, err := c.ListObjectParts(ctx, bucket, key, uploadId, 0, 2000)
+		if err != nil {
+			return errors.Wrap(err, "List object parts failed")
+		}
+		if len(result.ObjectParts) > 0 {
+			um.Debugf("Upload id: %s is still valid", uploadId)
+		} else {
+			uploadId = ""
+		}
 	}
 	if uploadId == "" {
 		uploadId, err = c.NewMultipartUpload(ctx, bucket, key, opts)
@@ -373,7 +371,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 					uploadingParts.Remove(partNumber)
 					minPart = uploadingParts.Peek()
 					um.Debugf("completed part received: %d", partNumber)
-				default:
 				}
 			}
 
