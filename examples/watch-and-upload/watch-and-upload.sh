@@ -35,7 +35,16 @@ fi
 # 定义日志文件
 UPLOAD_LOGS="$HOME/.UPLOAD_LOGS"
 RECORD_LOGS="$HOME/.RECORD_LOGS"
-NAMING_PATTERN="auto-upload-$(date +'%Y-%m-%d-%H')"
+
+# 设置延迟时间（秒）
+LATENCY=60
+
+# 使用关联数组来跟踪最后处理的时间戳
+declare -A last_processed
+
+get_naming_pattern() {
+    echo "auto-upload-$(date +'%Y-%m-%d-%H')"
+}
 
 # 确保日志文件存在
 touch "$UPLOAD_LOGS" "$RECORD_LOGS"
@@ -43,12 +52,12 @@ touch "$UPLOAD_LOGS" "$RECORD_LOGS"
 # 在云端创建新记录并获取 RECORD
 create_new_record() {
     local name
-    name="$NAMING_PATTERN"
+    name=$(get_naming_pattern)
     local id
     id=$(cocli record create -t "$name" | awk -F'/' '{print $NF}' | tr -d ' \n' | cut -c 1-36)
 
     if [ ${#id} -eq 36 ]; then
-        printf "%s|%s\n" "$NAMING_PATTERN" "$id" >>"$RECORD_LOGS"
+        printf "%s|%s\n" "$name" "$id" >>"$RECORD_LOGS"
         echo "$id"
     else
         echo "错误: 无法创建有效的记录 ID" >&2
@@ -58,16 +67,18 @@ create_new_record() {
 
 # 获取当前小时的记录 ID
 get_current_record_id() {
+    local current_pattern
+    current_pattern=$(get_naming_pattern)
     local id
-    id=$(grep "^$NAMING_PATTERN|" "$RECORD_LOGS" | tail -n 1 | cut -d'|' -f2)
+    id=$(grep "^$current_pattern|" "$RECORD_LOGS" | tail -n 1 | cut -d'|' -f2)
 
     if [ ${#id} -ne 36 ]; then
         # 尝试从云端获取记录
-        id=$(cocli record list | grep "$NAMING_PATTERN" | awk '{print $1}' | head -n 1)
+        id=$(cocli record list | grep "$current_pattern" | awk '{print $1}' | head -n 1)
 
         if [ ${#id} -eq 36 ]; then
             # 如果从云端找到了有效的ID，将其写入本地记录
-            echo "$NAMING_PATTERN|$id" >>"$RECORD_LOGS"
+            echo "$current_pattern|$id" >>"$RECORD_LOGS"
             echo "从云端找到并缓存了记录: $id" >&2
         else
             # 如果云端也没有找到，创建新记录
@@ -79,7 +90,7 @@ get_current_record_id() {
 }
 
 # 处理新文件
-process_file() {
+upload_file() {
     local file="$1"
     file=$(realpath -s "$file")
     [ ! -f "$file" ] && return
@@ -118,7 +129,7 @@ function search_files() {
         elif [ -f "$file" ]; then
             # 如果是文件，检查后缀
             if [[ "$file" == *".log" ]]; then
-                process_file "$file"
+                upload_file "$file"
             fi
         fi
     done
@@ -131,21 +142,45 @@ initialize() {
     echo "初始化完成。"
 }
 
+
+# fswatch 本身因为实现问题会反复触发文件事件
+# 本脚本只关心最新状态，debounce 掉重复信息
+# 在 latency 窗口内只处理一次
+process_event() {
+    local file="$1"
+    local current_time=$(date +%s)
+
+    # 检查文件是否最近被处理过
+    if [[ -v last_processed[$file] ]]; then
+        local time_diff=$((current_time - ${last_processed[$file]}))
+        if [[ $time_diff -lt $LATENCY ]]; then
+            return
+        fi
+    fi
+
+    # 更新最后处理时间
+    last_processed[$file]=$current_time
+
+    # 处理文件
+    if [ -f "$file" ] && [[ "$(basename "$file")" != .* ]] && [[ "$file" == *".log" ]]; then
+        echo "正在处理 $file"
+        upload_file "$file"
+    fi
+}
+
 main() {
     echo "开始初始化..."
     initialize
 
     echo "开始监控目录: $WATCH_DIR"
     fswatch --event Created --event Updated --event MovedTo -0 -r \
+        --latency=$LATENCY \
         -e "(/|^)\.[^/]*$" \
         -e "/sed.*\.tmp$" \
         "$WATCH_DIR" | while read -d "" event; do
 
         event=$(realpath -s "$event")
-        if [ -f "$event" ] && [[ "$(basename "$event")" != .* ]]; then
-            echo "正在处理 $event"
-            process_file "$event"
-        fi
+        process_event "$event"
     done
 }
 

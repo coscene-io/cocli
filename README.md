@@ -1,10 +1,10 @@
 # coScene CLI (coCLI)
 
-`cocli` 是基于 [cobra](https://github.com/spf13/cobra) 开发的 coScene 命令行工具，用于与 coScene 平台进行交互，便于用户在终端中对 coScene 平台的资源进行管理。
+`cocli` 是刻行时空（coScene）的命令行工具，方便用户在终端和自动化过程中对刻行时空平台的资源进行管理。
 
-具体的使用方法请参考 [coScene CLI 文档](https://docs.coscene.cn/docs/category/cli)。
+`cocli` 所有的命令都可以通过添加 `-h` 参数查看帮助。
 
-另外，`cocli` 所有的命令都可以通过添加 `-h` 参数查看帮助文档。
+详细的图文操作指南和常见操作实例方法请参考 [刻行时空 coCli 文档](https://docs.coscene.cn/docs/category/cocli)。
 
 ## 安装
 
