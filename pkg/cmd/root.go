@@ -101,6 +101,7 @@ func NewCommand() *cobra.Command {
 
 	cmd.PersistentFlags().StringVar(&cfgPath, "config", constants.DefaultConfigPath, "config file path")
 	cmd.PersistentFlags().StringVar(&logLevel, "log-level", "info", "log level, one of: trace|debug|info|warn|error")
+	cmd.PersistentFlags().Bool("pprof", false, "enable cpu profile")
 
 	cmd.AddCommand(NewCompletionCommand())
 	cmd.AddCommand(action.NewRootCommand(&cfgPath))

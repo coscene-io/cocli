@@ -17,9 +17,16 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"runtime/pprof"
+	"strconv"
 
 	"github.com/coscene-io/cocli/pkg/cmd"
 	log "github.com/sirupsen/logrus"
+)
+
+const (
+	profilePath = "/tmp/cpu_profile"
 )
 
 func main() {
@@ -27,8 +34,43 @@ func main() {
 		DisableTimestamp: true,
 	})
 
+	if isPProfEnabled() {
+		cpuf, err := os.Create(profilePath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer cpuf.Close()
+
+		runtime.SetCPUProfileRate(getProfileHZ())
+		err = pprof.StartCPUProfile(cpuf)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Infof("Dump cpu profile file into %s.", profilePath)
+		defer pprof.StopCPUProfile()
+	}
+
 	if err := cmd.NewCommand().Execute(); err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+func isPProfEnabled() (enable bool) {
+	for _, arg := range os.Args {
+		if arg == "--pprof" {
+			enable = true
+			break
+		}
+	}
+
+	return
+}
+
+func getProfileHZ() int {
+	profileRate := 1000
+	if s, err := strconv.Atoi(os.Getenv("PROFILE_RATE")); err == nil {
+		profileRate = s
+	}
+	return profileRate
 }
