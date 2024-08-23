@@ -191,34 +191,34 @@ func (um *UploadManager) UploadFileThroughUrl(file string, uploadUrl string) err
 // If the file size is larger than minPartSize, it will use multipart upload.
 func (um *UploadManager) FPutObject(absPath string, bucket string, key string, userTags map[string]string) {
 	// Check if file sha256 matches.
-	fileInfo, ok := um.FileInfos[absPath]
-	if !ok {
-		um.AddErr(absPath, errors.New("File info not found"))
-		return
-	}
+	//fileInfo, ok := um.FileInfos[absPath]
+	//if !ok {
+	//	um.AddErr(absPath, errors.New("File info not found"))
+	//	return
+	//}
 
 	um.Add(1)
 	go func() {
 		defer um.Done()
 		um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
 
-		size, err := um.opts.partSize()
-		if err != nil {
-			um.AddErr(absPath, err)
-			return
-		}
+		//size, err := um.opts.partSize()
+		//if err != nil {
+		//	um.AddErr(absPath, err)
+		//	return
+		//}
 
 		//if fileInfo.Size > int64(size) {
-		err = um.FMultipartPutObject(context.Background(), bucket, key,
-			absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
+		//	err = um.FMultipartPutObject(context.Background(), bucket, key,
+		//		absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
 		//} else {
-		//	progress := &uploadProgressReader{
-		//		absPath: absPath,
-		//		monitor: um.StatusMonitor,
-		//	}
-		//	um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
-		//	_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
-		//		minio.PutObjectOptions{Progress: progress, UserTags: userTags})
+		progress := &uploadProgressReader{
+			absPath: absPath,
+			monitor: um.StatusMonitor,
+		}
+		um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
+		_, err := um.client.FPutObject(context.Background(), bucket, key, absPath,
+			minio.PutObjectOptions{Progress: progress, UserTags: userTags})
 		//}
 		if err != nil {
 			um.AddErr(absPath, err)
