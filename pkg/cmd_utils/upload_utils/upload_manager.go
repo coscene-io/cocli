@@ -103,7 +103,7 @@ func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
 	statusMonitorStartSignal := new(sync.WaitGroup)
 	um.statusMonitorDoneSignal.Add(1)
-	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal))
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(10))
 	go um.runUploadStatusMonitor()
 	statusMonitorStartSignal.Wait()
 
@@ -268,13 +268,14 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	if uploadIdBytes != nil {
 		uploadId = string(uploadIdBytes)
 		result, err := c.ListObjectParts(ctx, bucket, key, uploadId, 0, 2000)
-		if err != nil {
-			return errors.Wrap(err, "List object parts failed")
-		}
-		if len(result.ObjectParts) > 0 {
-			um.Debugf("Upload id: %s is still valid", uploadId)
-		} else {
+		if err != nil || len(result.ObjectParts) == 0 {
+			um.Debugf("List object parts by: %s failed: %v", uploadIdKey, err)
 			uploadId = ""
+			if err = db.Reset(); err != nil {
+				return errors.Wrap(err, "Reset db failed")
+			}
+		} else {
+			um.Debugf("Upload id: %s is still valid", uploadId)
 		}
 	}
 	if uploadId == "" {
@@ -363,25 +364,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		minPart := curPart
 
 		for {
-			if uploadingParts.Len() > 0 {
-				// Wait for a part to complete.
-				select {
-				case <-ctx.Done():
-					return
-				case partNumber := <-completedPartsCh:
-					uploadingParts.Remove(partNumber)
-					if uploadingParts.Len() == 0 {
-						// Handle the case when partNumber is the last part.
-						// In this case, it means that all other parts in the window are uploaded.
-						// We thus need to update the minPart to the immediate next part outside the window.
-						minPart = partNumber + windowSize/int(partSize)
-					} else {
-						minPart = uploadingParts.Peek()
-					}
-					um.Debugf("completed part received: %d", partNumber)
-				}
-			}
-
 			// Upload parts in window.
 			for curPart <= totalPartsCount && curPart < minPart+windowSize/int(partSize) {
 				if !slices.Contains(partNumbers, curPart) {
@@ -390,6 +372,23 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 					uploadPartsCh <- curPart
 				}
 				curPart++
+			}
+
+			// Wait for a part to complete.
+			select {
+			case <-ctx.Done():
+				return
+			case partNumber := <-completedPartsCh:
+				uploadingParts.Remove(partNumber)
+				if uploadingParts.Len() == 0 {
+					// Handle the case when partNumber is the last part.
+					// In this case, it means that all other parts in the window are uploaded.
+					// We thus need to update the minPart to the immediate next part outside the window.
+					minPart = partNumber + windowSize/int(partSize)
+				} else {
+					minPart = uploadingParts.Peek()
+				}
+				um.Debugf("completed part received: %d", partNumber)
 			}
 		}
 	}()
