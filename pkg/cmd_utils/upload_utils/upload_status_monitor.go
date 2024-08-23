@@ -90,6 +90,9 @@ func (msg UpdateStatusMsg) UpdateStatus(m *UploadStatusMonitor) {
 // calculateUploadProgress is used to calculate the progress of a file upload
 func (m *UploadStatusMonitor) calculateUploadProgress(name string) float64 {
 	status := m.uploadStatusMap[name]
+	if status.total == 0 {
+		return 100
+	}
 	return float64(status.uploaded) * 100 / float64(status.total)
 }
 

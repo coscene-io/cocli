@@ -72,6 +72,18 @@ func (db *UploadDB) BatchPut(kvs map[string][]byte) error {
 	})
 }
 
+// Reset removes all the keys from the database multipart_uploads bucket.
+func (db *UploadDB) Reset() error {
+	return db.Update(func(tx *bolt.Tx) error {
+		err := tx.DeleteBucket([]byte(multipartUploadsBucket))
+		if err != nil {
+			return err
+		}
+		_, err = tx.CreateBucketIfNotExists([]byte(multipartUploadsBucket))
+		return err
+	})
+}
+
 // Delete removes the database file from the filesystem.
 func (db *UploadDB) Delete() error {
 	return os.Remove(db.Path())

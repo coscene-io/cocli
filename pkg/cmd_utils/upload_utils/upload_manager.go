@@ -103,7 +103,7 @@ func NewUploadManager(client *minio.Client, opts *MultipartOpts) (*UploadManager
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
 	statusMonitorStartSignal := new(sync.WaitGroup)
 	um.statusMonitorDoneSignal.Add(1)
-	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal))
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(10))
 	go um.runUploadStatusMonitor()
 	statusMonitorStartSignal.Wait()
 
@@ -224,7 +224,6 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 		} else {
 			progress := &uploadProgressReader{
 				absPath:            absPath,
-				total:              fileInfo.Size,
 				uploadProgressChan: um.uploadProgressChan,
 			}
 			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
@@ -233,6 +232,8 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 		}
 		if err != nil {
 			um.AddErr(absPath, err)
+		} else {
+			um.StatusMonitor.Send(UpdateStatusMsg{Name: absPath, Status: UploadCompleted})
 		}
 	}()
 }
@@ -266,17 +267,16 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	}
 	if uploadIdBytes != nil {
 		uploadId = string(uploadIdBytes)
-		// todo(shuhao): Check if the upload id is still valid.
-		//uploads, err := c.ListMultipartUploads(ctx, bucket, key, "", "", "/", 2000)
-		//if err != nil {
-		//	return errors.Wrap(err, "List multipart uploads failed")
-		//}
-		//um.StatusMonitor.Println("uploads: ", uploads)
-		//if !lo.ContainsBy(uploads.Uploads, func(u minio.ObjectMultipartInfo) bool {
-		//	return u.UploadID == uploadId
-		//}) {
-		//	uploadId = ""
-		//}
+		result, err := c.ListObjectParts(ctx, bucket, key, uploadId, 0, 2000)
+		if err != nil || len(result.ObjectParts) == 0 {
+			um.Debugf("List object parts by: %s failed: %v", uploadIdKey, err)
+			uploadId = ""
+			if err = db.Reset(); err != nil {
+				return errors.Wrap(err, "Reset db failed")
+			}
+		} else {
+			um.Debugf("Upload id: %s is still valid", uploadId)
+		}
 	}
 	if uploadId == "" {
 		uploadId, err = c.NewMultipartUpload(ctx, bucket, key, opts)
@@ -364,19 +364,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 		minPart := curPart
 
 		for {
-			if uploadingParts.Len() > 0 {
-				// Wait for a part to complete.
-				select {
-				case <-ctx.Done():
-					return
-				case partNumber := <-completedPartsCh:
-					uploadingParts.Remove(partNumber)
-					minPart = uploadingParts.Peek()
-					um.Debugf("completed part received: %d", partNumber)
-				default:
-				}
-			}
-
 			// Upload parts in window.
 			for curPart <= totalPartsCount && curPart < minPart+windowSize/int(partSize) {
 				if !slices.Contains(partNumbers, curPart) {
@@ -385,6 +372,23 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 					uploadPartsCh <- curPart
 				}
 				curPart++
+			}
+
+			// Wait for a part to complete.
+			select {
+			case <-ctx.Done():
+				return
+			case partNumber := <-completedPartsCh:
+				uploadingParts.Remove(partNumber)
+				if uploadingParts.Len() == 0 {
+					// Handle the case when partNumber is the last part.
+					// In this case, it means that all other parts in the window are uploaded.
+					// We thus need to update the minPart to the immediate next part outside the window.
+					minPart = partNumber + windowSize/int(partSize)
+				} else {
+					minPart = uploadingParts.Peek()
+				}
+				um.Debugf("completed part received: %d", partNumber)
 			}
 		}
 	}()
@@ -499,7 +503,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	if err = db.Delete(); err != nil {
 		return errors.Wrap(err, "Delete db failed")
 	}
-	um.StatusMonitor.Send(UpdateStatusMsg{Name: filePath, Status: UploadCompleted})
 
 	return nil
 }
@@ -507,7 +510,6 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
 	absPath            string
-	total              int64
 	uploaded           int64
 	uploadProgressChan chan UpdateStatusMsg
 }
@@ -517,9 +519,6 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	r.uploaded += n
 
 	updateMsg := UpdateStatusMsg{Name: r.absPath, Uploaded: n}
-	if r.uploaded == r.total {
-		updateMsg.Status = UploadCompleted
-	}
 	r.uploadProgressChan <- updateMsg
 	return int(n), nil
 }
