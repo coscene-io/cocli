@@ -1,9 +1,18 @@
 package upload_utils
 
 import (
+	"os"
+	"path/filepath"
+
+	"github.com/coscene-io/cocli/api"
 	"github.com/dustin/go-humanize"
 	"github.com/pkg/errors"
 )
+
+type ApiOpts struct {
+	api.SecurityTokenInterface
+	api.FileInterface
+}
 
 var (
 	defaultPartSize = uint64(1024 * 1024 * 128)
@@ -26,4 +35,27 @@ func (opt *MultipartOpts) partSize() (uint64, error) {
 		return defaultPartSize, nil
 	}
 	return humanize.ParseBytes(opt.Size)
+}
+
+type FileOpts struct {
+	Path          string
+	relDir        string
+	Recursive     bool
+	IncludeHidden bool
+}
+
+func (opt *FileOpts) Valid() error {
+	if opt.Path == "" {
+		return errors.New("file path not empty")
+	}
+
+	opt.relDir = opt.Path
+	fileInfo, err := os.Stat(opt.Path)
+	if err != nil {
+		return errors.Wrap(err, "invalid file path")
+	}
+	if !fileInfo.IsDir() {
+		opt.relDir = filepath.Dir(opt.Path)
+	}
+	return nil
 }
