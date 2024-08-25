@@ -33,6 +33,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 		projectSlug   = ""
 		multiOpts     = &upload_utils.MultipartOpts{}
 		timeout       time.Duration
+		hideMonitor   = false
 	)
 
 	cmd := &cobra.Command{
@@ -62,7 +63,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Uploading files to record: %s\n", recordName.RecordID)
 
 			// create minio client and upload manager first.
-			um, err := upload_utils.NewUploadManagerFromConfig(proj, timeout,
+			um, err := upload_utils.NewUploadManagerFromConfig(proj, timeout, hideMonitor,
 				&upload_utils.ApiOpts{SecurityTokenInterface: pm.SecurityTokenCli(), FileInterface: pm.FileCli()}, multiOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
@@ -88,6 +89,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
 	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
+	cmd.Flags().BoolVar(&hideMonitor, "hide-monitor", false, "hide the upload status monitor")
 
 	return cmd
 }
