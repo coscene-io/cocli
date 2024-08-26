@@ -139,7 +139,7 @@ function search_files() {
 
 main() {
     while true; do
-        echo "执行定期扫描..."
+        echo "开始执行定期扫描..."
         search_files "$WATCH_DIR"
 
         echo "完成定期扫描，等待上传间隔"
