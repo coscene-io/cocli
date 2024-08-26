@@ -11,7 +11,9 @@ fi
 if [[ "${1-}" =~ ^-*h(elp)?$ ]]; then
     echo '用法: ./watch-and-upload.sh [WATCH_DIR]
 
-此脚本使用 fswatch 监控指定目录的新文件，使用 cocli 上传它们，并管理上传记录。
+此脚本定期检查给定目录下的文件，并使用 cocli 上传它们，管理上传记录。
+
+默认的扫描为 20 秒，可以在脚本的配置中设置 SCAN_INTERVAL
 
 WATCH_DIR: 可选。要监控的目录。如果未提供，将使用当前目录。
 
