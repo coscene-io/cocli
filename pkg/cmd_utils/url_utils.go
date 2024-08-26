@@ -61,6 +61,8 @@ func (pr *Progress) Print() {
 // file is the absolute path of the file to be downloaded.
 // downloadUrl is the pre-signed url to download the file from.
 func DownloadFileThroughUrl(file string, downloadUrl string, isRetry bool) error {
+	defer fmt.Print("\r\033[K")
+
 	err := os.MkdirAll(filepath.Dir(file), 0755)
 	if err != nil {
 		return errors.Wrapf(err, "unable to create directories for file %v", file)
