@@ -97,24 +97,16 @@ func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, hideM
 		Errs:                    make(map[string]error),
 	}
 
-	if hideMonitor {
-		return um, nil
-	}
-
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
-	statusMonitorStartSignal := new(sync.WaitGroup)
 	um.statusMonitorDoneSignal.Add(1)
-	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(1))
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(hideMonitor), tea.WithFPS(1))
 	go um.runUploadStatusMonitor()
-	statusMonitorStartSignal.Wait()
 
 	return um, nil
 }
 
 func (um *UploadManager) UpdateMonitor(msg interface{}) {
-	if um.StatusMonitor != nil {
-		um.StatusMonitor.Send(msg)
-	}
+	um.StatusMonitor.Send(msg)
 }
 
 func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *FileOpts) error {
@@ -149,11 +141,7 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 func (um *UploadManager) Debugf(format string, args ...interface{}) {
 	if um.isDebug {
 		msg := fmt.Sprintf(format, args...)
-		if um.StatusMonitor != nil {
-			um.StatusMonitor.Printf("DEBUG: %s\n", msg)
-		} else {
-			log.Debugf(msg)
-		}
+		um.StatusMonitor.Printf("DEBUG: %s\n", msg)
 	}
 }
 
@@ -164,8 +152,8 @@ func (um *UploadManager) runUploadStatusMonitor() {
 		log.Fatalf("Error running upload status monitor: %v", err)
 	}
 	um.PrintErrs()
-	if finalModel.(*UploadStatusMonitor).ManualQuit {
-		log.Fatalf("Upload status monitor quit manually")
+	if q, ok := finalModel.(manualQuit); ok && q.Quit() {
+		log.Fatalf("Upload quit manually")
 	}
 }
 
@@ -173,10 +161,8 @@ func (um *UploadManager) runUploadStatusMonitor() {
 func (um *UploadManager) Wait() {
 	um.WaitGroup.Wait()
 	time.Sleep(1 * time.Second) // Buffer time for status monitor to finish receiving messages.
-	if um.StatusMonitor != nil {
-		um.StatusMonitor.Quit()
-		um.statusMonitorDoneSignal.Wait()
-	}
+	um.StatusMonitor.Quit()
+	um.statusMonitorDoneSignal.Wait()
 }
 
 // AddErr adds an error to the manager.
@@ -642,11 +628,9 @@ type uploadProgressReader struct {
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n := int64(len(b))
 	r.uploaded += n
-	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
-			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint})
-			r.prevUploadedCheckpoint = r.uploaded
-		}
+	if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
+		r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint})
+		r.prevUploadedCheckpoint = r.uploaded
 	}
 	return int(n), nil
 }
@@ -670,11 +654,9 @@ type uploadProgressSectionReader struct {
 func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
 	r.uploaded += int64(n)
-	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
-			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint, Status: UploadInProgress})
-			r.prevUploadedCheckpoint = r.uploaded
-		}
+	if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
+		r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint, Status: UploadInProgress})
+		r.prevUploadedCheckpoint = r.uploaded
 	}
 	return n, err
 }
