@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/fs"
@@ -119,6 +120,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 						break
 					}
 					log.Errorf("unable to download file %s (try #%d): %v", fileName.Filename, i, err)
+					time.Sleep(3 * time.Second)
 				}
 				fmt.Println()
 			}
@@ -128,7 +130,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
-	cmd.Flags().IntVarP(&maxRetries, "max-retries", "r", 2, "maximum number of retries for downloading a file")
+	cmd.Flags().IntVarP(&maxRetries, "max-retries", "r", 3, "maximum number of retries for downloading a file")
 
 	return cmd
 }
