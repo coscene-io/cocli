@@ -114,7 +114,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 
 				// Download file with #maxRetries retries
 				for i := 1; i <= maxRetries; i++ {
-					if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl); err == nil {
+					if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl, i != 1); err == nil {
 						successCount++
 						fmt.Printf("File successfully downloaded!\n")
 						break
