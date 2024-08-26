@@ -17,11 +17,25 @@ package upload_utils
 import (
 	"fmt"
 	"strings"
-	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/reflow/wordwrap"
 )
+
+type manualQuit interface {
+	Quit() bool
+}
+
+func NewUploadStatusMonitor(hidden bool) tea.Model {
+	if !hidden {
+		return &UploadStatusMonitor{
+			uploadStatusMap: make(map[string]*uploadStatus),
+			orderedFileList: []string{},
+			windowWidth:     0,
+		}
+	}
+	return &DummyMonitor{}
+}
 
 // UploadStatusMonitor is a bubbletea model that is used to monitor the progress of file uploads
 type UploadStatusMonitor struct {
@@ -34,20 +48,7 @@ type UploadStatusMonitor struct {
 	// windowWidth is used to calculate the width of the terminal
 	windowWidth int
 
-	// startSignal is used to signal the upload status monitor has finished initialization
-	startSignal *sync.WaitGroup
-
 	ManualQuit bool
-}
-
-func NewUploadStatusMonitor(startSignal *sync.WaitGroup) *UploadStatusMonitor {
-	startSignal.Add(1)
-	return &UploadStatusMonitor{
-		uploadStatusMap: make(map[string]*uploadStatus),
-		orderedFileList: []string{},
-		windowWidth:     0,
-		startSignal:     startSignal,
-	}
 }
 
 // AddFileMsg is a message that is used to add a file to the upload status monitor
@@ -97,7 +98,6 @@ func (m *UploadStatusMonitor) calculateUploadProgress(name string) float64 {
 }
 
 func (m *UploadStatusMonitor) Init() tea.Cmd {
-	m.startSignal.Done()
 	return nil
 }
 
@@ -160,6 +160,10 @@ func (m *UploadStatusMonitor) View() string {
 	return s
 }
 
+func (m *UploadStatusMonitor) Quit() bool {
+	return m.ManualQuit
+}
+
 // UploadStatusEnum is used to keep track of the state of a file upload
 type UploadStatusEnum int
 
@@ -188,4 +192,34 @@ type uploadStatus struct {
 	total    int64
 	uploaded int64
 	status   UploadStatusEnum
+}
+
+type DummyMonitor struct {
+	ManualQuit bool
+}
+
+func (m *DummyMonitor) Init() tea.Cmd {
+	return nil
+}
+
+func (m *DummyMonitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.QuitMsg:
+		return m, tea.Quit
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyEscape, tea.KeyCtrlD:
+			m.ManualQuit = true
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+func (m *DummyMonitor) View() string {
+	return ""
+}
+
+func (m *DummyMonitor) Quit() bool {
+	return m.ManualQuit
 }

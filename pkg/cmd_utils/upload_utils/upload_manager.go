@@ -18,11 +18,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/coscene-io/cocli/internal/config"
-	"github.com/coscene-io/cocli/internal/constants"
-	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/pkg/cmd_utils"
-	"github.com/minio/minio-go/v7/pkg/credentials"
 	"io"
 	"mime"
 	"net/url"
@@ -34,8 +29,14 @@ import (
 	"sync"
 	"time"
 
+	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/coscene-io/cocli/internal/constants"
+	"github.com/coscene-io/cocli/internal/fs"
+	"github.com/coscene-io/cocli/internal/name"
+	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	log "github.com/sirupsen/logrus"
@@ -62,6 +63,7 @@ type FileInfo struct {
 // Note that it's user's responsibility to check the Errs field after Wait() to see if there's any error.
 type UploadManager struct {
 	opts                    *MultipartOpts
+	apiOpts                 *ApiOpts
 	client                  *minio.Client
 	statusMonitorDoneSignal *sync.WaitGroup
 	StatusMonitor           *tea.Program
@@ -71,8 +73,11 @@ type UploadManager struct {
 	sync.WaitGroup
 }
 
-func NewUploadManagerFromConfig(pm *config.ProfileManager, proj *name.Project, timeout time.Duration, hideMonitor bool, multiOpts *MultipartOpts) (*UploadManager, error) {
-	generateSecurityTokenRes, err := pm.SecurityTokenCli().GenerateSecurityToken(context.Background(), proj.String())
+func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, hideMonitor bool, apiOpts *ApiOpts, multiOpts *MultipartOpts) (*UploadManager, error) {
+	if err := multiOpts.Valid(); err != nil {
+		return nil, errors.Wrap(err, "invalid multipart options")
+	}
+	generateSecurityTokenRes, err := apiOpts.GenerateSecurityToken(context.Background(), proj.String())
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to generate security token")
 	}
@@ -85,47 +90,61 @@ func NewUploadManagerFromConfig(pm *config.ProfileManager, proj *name.Project, t
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to create minio client")
 	}
-	return NewUploadManager(mc, hideMonitor, multiOpts), nil
-}
-
-func NewUploadManager(client *minio.Client, hideMonitor bool, opts *MultipartOpts) *UploadManager {
 	um := &UploadManager{
-		opts:                    opts,
-		client:                  client,
+		opts:                    multiOpts,
+		apiOpts:                 apiOpts,
+		client:                  mc,
 		statusMonitorDoneSignal: new(sync.WaitGroup),
 		isDebug:                 log.GetLevel() == log.DebugLevel,
 		FileInfos:               make(map[string]FileInfo),
 		Errs:                    make(map[string]error),
 	}
 
-	if hideMonitor {
-		return um
-	}
-
 	// statusMonitorStartSignal is to ensure status monitor is ready before sending messages.
-	statusMonitorStartSignal := new(sync.WaitGroup)
 	um.statusMonitorDoneSignal.Add(1)
-	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(statusMonitorStartSignal), tea.WithFPS(1))
+	um.StatusMonitor = tea.NewProgram(NewUploadStatusMonitor(hideMonitor), tea.WithFPS(1))
 	go um.runUploadStatusMonitor()
-	statusMonitorStartSignal.Wait()
 
-	return um
+	return um, nil
 }
 
 func (um *UploadManager) UpdateMonitor(msg interface{}) {
-	if um.StatusMonitor != nil {
-		um.StatusMonitor.Send(msg)
+	um.StatusMonitor.Send(msg)
+}
+
+func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *FileOpts) error {
+	if err := fileOpts.Valid(); err != nil {
+		return err
 	}
+
+	files := fs.GenerateFiles(fileOpts.Path, fileOpts.Recursive, fileOpts.IncludeHidden)
+	fileUploadUrlBatches := um.generateUploadUrlBatches(files, rcd, fileOpts.relDir)
+
+	for fileUploadUrls := range fileUploadUrlBatches {
+		for fileResourceName, uploadUrl := range fileUploadUrls {
+			fileResource, err := name.NewFile(fileResourceName)
+			if err != nil {
+				um.AddErr(fileResourceName, errors.Wrapf(err, "unable to parse file resource name"))
+				continue
+			}
+
+			fileAbsolutePath := filepath.Join(fileOpts.relDir, fileResource.Filename)
+
+			if err = um.UploadFileThroughUrl(fileAbsolutePath, uploadUrl); err != nil {
+				um.AddErr(fileAbsolutePath, errors.Wrapf(err, "unable to upload file"))
+				continue
+			}
+		}
+	}
+
+	um.Wait()
+	return nil
 }
 
 func (um *UploadManager) Debugf(format string, args ...interface{}) {
 	if um.isDebug {
 		msg := fmt.Sprintf(format, args...)
-		if um.StatusMonitor != nil {
-			um.StatusMonitor.Printf("DEBUG: %s\n", msg)
-		} else {
-			log.Debugf(msg)
-		}
+		um.StatusMonitor.Printf("DEBUG: %s\n", msg)
 	}
 }
 
@@ -136,8 +155,8 @@ func (um *UploadManager) runUploadStatusMonitor() {
 		log.Fatalf("Error running upload status monitor: %v", err)
 	}
 	um.PrintErrs()
-	if finalModel.(*UploadStatusMonitor).ManualQuit {
-		log.Fatalf("Upload status monitor quit manually")
+	if q, ok := finalModel.(manualQuit); ok && q.Quit() {
+		log.Fatalf("Upload quit manually")
 	}
 }
 
@@ -145,10 +164,8 @@ func (um *UploadManager) runUploadStatusMonitor() {
 func (um *UploadManager) Wait() {
 	um.WaitGroup.Wait()
 	time.Sleep(1 * time.Second) // Buffer time for status monitor to finish receiving messages.
-	if um.StatusMonitor != nil {
-		um.StatusMonitor.Quit()
-		um.statusMonitorDoneSignal.Wait()
-	}
+	um.StatusMonitor.Quit()
+	um.statusMonitorDoneSignal.Wait()
 }
 
 // AddErr adds an error to the manager.
@@ -515,6 +532,93 @@ func (um *UploadManager) FMultipartPutObject(ctx context.Context, bucket string,
 	return nil
 }
 
+const (
+	processBatchSize = 20
+)
+
+func (um *UploadManager) generateUploadUrlBatches(filesGenerator <-chan string, recordName *name.Record, relativeDir string) <-chan map[string]string {
+	ret := make(chan map[string]string)
+	go func() {
+		defer close(ret)
+		var files []*openv1alpha1resource.File
+		for f := range filesGenerator {
+			um.UpdateMonitor(AddFileMsg{
+				Name: f,
+			})
+			checksum, size, err := fs.CalSha256AndSize(f)
+			if err != nil {
+				um.AddErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
+				continue
+			}
+			um.FileInfos[f] = FileInfo{
+				Path:   f,
+				Size:   size,
+				Sha256: checksum,
+			}
+			um.UpdateMonitor(UpdateStatusMsg{
+				Name:  f,
+				Total: size,
+			})
+
+			relativePath, err := filepath.Rel(relativeDir, f)
+			if err != nil {
+				um.AddErr(f, errors.Wrapf(err, "unable to get relative path"))
+				continue
+			}
+
+			// Check if the file already exists in the record.
+			getFileRes, err := um.apiOpts.GetFile(context.TODO(), name.File{
+				ProjectID: recordName.ProjectID,
+				RecordID:  recordName.RecordID,
+				Filename:  relativePath,
+			}.String())
+			if err == nil && getFileRes.Sha256 == checksum && getFileRes.Size == size {
+				um.UpdateMonitor(UpdateStatusMsg{
+					Name:   f,
+					Status: PreviouslyUploaded,
+				})
+				continue
+			}
+
+			files = append(files, &openv1alpha1resource.File{
+				Name: name.File{
+					ProjectID: recordName.ProjectID,
+					RecordID:  recordName.RecordID,
+					Filename:  relativePath,
+				}.String(),
+				Filename: relativePath,
+				Sha256:   checksum,
+				Size:     size,
+			})
+
+			if len(files) == processBatchSize {
+				res, err := um.apiOpts.GenerateFileUploadUrls(context.TODO(), recordName, files)
+				if err != nil {
+					for _, file := range files {
+						um.AddErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
+					}
+					continue
+				}
+				ret <- res
+				files = nil
+			}
+		}
+
+		if len(files) > 0 {
+			res, err := um.apiOpts.GenerateFileUploadUrls(context.TODO(), recordName, files)
+			if err != nil {
+				for _, file := range files {
+					um.AddErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
+				}
+				return
+			}
+			ret <- res
+		}
+	}()
+
+	return ret
+}
+
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
 	absPath                string
@@ -527,11 +631,9 @@ type uploadProgressReader struct {
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n := int64(len(b))
 	r.uploaded += n
-	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
-			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint})
-			r.prevUploadedCheckpoint = r.uploaded
-		}
+	if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
+		r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint})
+		r.prevUploadedCheckpoint = r.uploaded
 	}
 	return int(n), nil
 }
@@ -555,11 +657,9 @@ type uploadProgressSectionReader struct {
 func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
 	r.uploaded += int64(n)
-	if r.monitor != nil {
-		if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
-			r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint, Status: UploadInProgress})
-			r.prevUploadedCheckpoint = r.uploaded
-		}
+	if r.uploaded-r.prevUploadedCheckpoint > r.total/20 || r.uploaded == r.total {
+		r.monitor.Send(UpdateStatusMsg{Name: r.absPath, Uploaded: r.uploaded - r.prevUploadedCheckpoint, Status: UploadInProgress})
+		r.prevUploadedCheckpoint = r.uploaded
 	}
 	return n, err
 }
