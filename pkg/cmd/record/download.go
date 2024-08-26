@@ -32,6 +32,7 @@ import (
 func NewDownloadCommand(cfgPath *string) *cobra.Command {
 	var (
 		projectSlug = ""
+		maxRetries  = 0
 	)
 
 	cmd := &cobra.Command{
@@ -110,10 +111,16 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 					continue
 				}
 
-				// Download file
-				cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl)
-				successCount++
-				fmt.Printf("File successfully downloaded!\n\n")
+				// Download file with #maxRetries retries
+				for i := 1; i <= maxRetries; i++ {
+					if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl); err == nil {
+						successCount++
+						fmt.Printf("File successfully downloaded!\n")
+						break
+					}
+					log.Errorf("unable to download file %s (try #%d): %v", fileName.Filename, i, err)
+				}
+				fmt.Println()
 			}
 
 			fmt.Printf("Download completed! \nAll %d files are saved to %s\n", successCount, dstDir)
@@ -121,6 +128,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
+	cmd.Flags().IntVarP(&maxRetries, "max-retries", "r", 2, "maximum number of retries for downloading a file")
 
 	return cmd
 }

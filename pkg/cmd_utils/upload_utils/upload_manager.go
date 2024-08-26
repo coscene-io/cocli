@@ -252,7 +252,7 @@ func (um *UploadManager) FPutObject(absPath string, bucket string, key string, u
 			}
 			um.UpdateMonitor(UpdateStatusMsg{Name: absPath, Status: UploadInProgress})
 			_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
-				minio.PutObjectOptions{Progress: progress, UserTags: userTags})
+				minio.PutObjectOptions{Progress: progress, UserTags: userTags, DisableMultipart: true})
 		}
 		if err != nil {
 			um.AddErr(absPath, err)
