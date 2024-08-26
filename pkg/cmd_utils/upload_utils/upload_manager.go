@@ -74,6 +74,9 @@ type UploadManager struct {
 }
 
 func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, hideMonitor bool, apiOpts *ApiOpts, multiOpts *MultipartOpts) (*UploadManager, error) {
+	if err := multiOpts.Valid(); err != nil {
+		return nil, errors.Wrap(err, "invalid multipart options")
+	}
 	generateSecurityTokenRes, err := apiOpts.GenerateSecurityToken(context.Background(), proj.String())
 	if err != nil {
 		return nil, errors.Wrap(err, "unable to generate security token")
