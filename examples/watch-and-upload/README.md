@@ -17,3 +17,23 @@
 ./watch-and-upload.sh /PATH/TO/THE/FOLDER # 监看给定的目录
 ./watch-and-upload.sh # 监看当前目录 $PWD
 ```
+
+# Watch and Upload Specified Directory
+
+Watch a specified directory and upload files to a designated record whenever there are new files or file changes.
+
+The script will check the local `$HOME/.RECORD_LOGS` file and attempt to find an existing record with the following naming convention. If not found, it will create a new record and append the record ID to the `$HOME/.RECORD_LOGS` file.
+
+Uploaded files will be saved in `.UPLOAD_LOGS` along with their corresponding hash values. When we attempt to upload a file, it checks `.UPLOAD_LOGS`, and if the file already exists, it skips the upload.
+
+## Prerequisites
+
+- Prepare cocli, refer to https://docs.coscene.cn/docs/cli/install
+
+## Usage
+
+```bash
+./watch-and-upload.sh -h # Help
+./watch-and-upload.sh /PATH/TO/THE/FOLDER # Watch the given directory
+./watch-and-upload.sh # Watch the current directory $PWD
+```
