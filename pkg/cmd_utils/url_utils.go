@@ -16,11 +16,12 @@ package cmd_utils
 
 import (
 	"fmt"
-	log "github.com/sirupsen/logrus"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/pkg/errors"
 )
 
 // Progress is a simple struct to keep track of the progress of a file upload/download
@@ -28,6 +29,7 @@ type Progress struct {
 	PrintPrefix string
 	TotalSize   int64
 	BytesRead   int64
+	IsRetry     bool
 }
 
 // Write is used to satisfy the io.Writer interface.
@@ -47,30 +49,34 @@ func (pr *Progress) Print() {
 		fmt.Print("\r\033[K")
 		return
 	}
-	fmt.Printf("\r%s: %d/%d %d%%", pr.PrintPrefix, pr.BytesRead, pr.TotalSize, 100*pr.BytesRead/pr.TotalSize)
+
+	retryHint := ""
+	if pr.IsRetry {
+		retryHint = "(Retry) "
+	}
+	fmt.Printf("\r\033[K%s%s: %d/%d %d%%", retryHint, pr.PrintPrefix, pr.BytesRead, pr.TotalSize, 100*pr.BytesRead/pr.TotalSize)
 }
 
 // DownloadFileThroughUrl downloads a single file from the given downloadUrl.
 // file is the absolute path of the file to be downloaded.
 // downloadUrl is the pre-signed url to download the file from.
-func DownloadFileThroughUrl(file string, downloadUrl string) {
+func DownloadFileThroughUrl(file string, downloadUrl string, isRetry bool) error {
+	defer fmt.Print("\r\033[K")
+
 	err := os.MkdirAll(filepath.Dir(file), 0755)
 	if err != nil {
-		log.Errorf("Unable to create directories for file %v", file)
-		return
+		return errors.Wrapf(err, "unable to create directories for file %v", file)
 	}
 
 	fileWriter, err := os.Create(file)
 	if err != nil {
-		log.Errorf("Unable to open file %v for writing", file)
-		return
+		return errors.Wrapf(err, "unable to open file %v for writing", file)
 	}
 	defer func() { _ = fileWriter.Close() }()
 
 	resp, err := http.Get(downloadUrl)
 	if err != nil {
-		log.Errorf("Unable to get file from %v", downloadUrl)
-		return
+		return errors.Wrapf(err, "unable to get file from url %v", downloadUrl)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -78,13 +84,15 @@ func DownloadFileThroughUrl(file string, downloadUrl string) {
 		PrintPrefix: "File download in progress",
 		TotalSize:   resp.ContentLength,
 		BytesRead:   0,
+		IsRetry:     isRetry,
 	}
 
 	tee := io.TeeReader(resp.Body, progress)
 
 	_, err = io.Copy(fileWriter, tee)
 	if err != nil {
-		log.Errorf("Unable to write file %v", file)
-		return
+		return errors.Wrapf(err, "unable to write file %v", file)
 	}
+
+	return nil
 }

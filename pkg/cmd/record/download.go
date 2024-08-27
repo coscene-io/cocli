@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/fs"
@@ -32,6 +33,7 @@ import (
 func NewDownloadCommand(cfgPath *string) *cobra.Command {
 	var (
 		projectSlug = ""
+		maxRetries  = 0
 	)
 
 	cmd := &cobra.Command{
@@ -110,10 +112,30 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 					continue
 				}
 
-				// Download file
-				cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl)
-				successCount++
-				fmt.Printf("File successfully downloaded!\n\n")
+				// Download file with #maxRetries retries
+				curTry := 1
+				for curTry <= maxRetries {
+					if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl, curTry != 1); err == nil {
+						successCount++
+						postfix := ""
+						if curTry > 1 {
+							postfix = fmt.Sprintf(" (after %d tries)", curTry)
+						}
+						fmt.Printf("File successfully downloaded!%s\n", postfix)
+						break
+					}
+					log.Errorf("unable to download file %s (try #%d): %v", fileName.Filename, curTry, err)
+					curTry++
+
+					if curTry <= maxRetries {
+						time.Sleep(3 * time.Second)
+					}
+				}
+
+				if curTry > maxRetries {
+					log.Errorf("failed to download file %s after %d tries", fileName.Filename, maxRetries)
+				}
+				fmt.Println()
 			}
 
 			fmt.Printf("Download completed! \nAll %d files are saved to %s\n", successCount, dstDir)
@@ -121,6 +143,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
+	cmd.Flags().IntVarP(&maxRetries, "max-retries", "r", 3, "maximum number of retries for downloading a file")
 
 	return cmd
 }
