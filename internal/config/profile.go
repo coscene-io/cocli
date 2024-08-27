@@ -29,7 +29,6 @@ import (
 	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/coscene-io/cocli/internal/name"
 	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
 // Profile represents a profile in the configuration file.
@@ -201,21 +200,21 @@ func (p *Profile) SecurityTokenCli() api.SecurityTokenInterface {
 // This function is ensured to be called only once.
 func (p *Profile) initCli() {
 	p.cliOnce.Do(func() {
-		conncli, err := api_utils.NewConnectClient(p.EndPoint)
-		if err != nil {
-			log.Fatalf("Unable to create connect client: %v", err)
+		conncli := api_utils.NewConnectClient()
+		interceptorsFactory := func() connect.Option {
+			return connect.WithInterceptors(api_utils.AuthInterceptor(p.Token), api_utils.UnaryRetryInterceptor(3))
 		}
 
 		var (
-			actionServiceClient        = openv1alpha1connect.NewActionServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			actionRunServiceClient     = openv1alpha1connect.NewActionRunServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			organizationServiceClient  = openv1alpha1connect.NewOrganizationServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			projectServiceClient       = openv1alpha1connect.NewProjectServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			recordServiceClient        = openv1alpha1connect.NewRecordServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			fileServiceClient          = openv1alpha1connect.NewFileServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			labelServiceClient         = openv1alpha1connect.NewLabelServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			userServiceClient          = openv1alpha1connect.NewUserServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
-			securityTokenServiceClient = openDssv1alphaconnect.NewSecurityTokenServiceClient(conncli, p.EndPoint, connect.WithGRPC(), connect.WithInterceptors(api_utils.AuthInterceptor(p.Token)))
+			actionServiceClient        = openv1alpha1connect.NewActionServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			actionRunServiceClient     = openv1alpha1connect.NewActionRunServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			organizationServiceClient  = openv1alpha1connect.NewOrganizationServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			projectServiceClient       = openv1alpha1connect.NewProjectServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			recordServiceClient        = openv1alpha1connect.NewRecordServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			fileServiceClient          = openv1alpha1connect.NewFileServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			labelServiceClient         = openv1alpha1connect.NewLabelServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			userServiceClient          = openv1alpha1connect.NewUserServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
+			securityTokenServiceClient = openDssv1alphaconnect.NewSecurityTokenServiceClient(conncli, p.EndPoint, connect.WithGRPC(), interceptorsFactory())
 		)
 
 		p.orgcli = api.NewOrganizationClient(organizationServiceClient)
