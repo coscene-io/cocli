@@ -81,10 +81,10 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Saving to %s\n", dstDir)
 
 			successCount := 0
-			for _, f := range files {
+			for fIdx, f := range files {
 				fileName, _ := name.NewFile(f.Name)
 				localPath := filepath.Join(dstDir, fileName.Filename)
-				fmt.Printf("\nDownloading #%d file: %s\n", successCount+1, fileName.Filename)
+				fmt.Printf("\nDownloading #%d file: %s\n", fIdx+1, fileName.Filename)
 
 				if !strings.HasPrefix(localPath, dstDir+string(os.PathSeparator)) {
 					log.Errorf("illegal file name: %s", fileName.Filename)
@@ -120,7 +120,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 				successCount++
 			}
 
-			fmt.Printf("\nDownload completed! \nAll %d/%d files are saved to %s\n", successCount, len(files), dstDir)
+			fmt.Printf("\nDownload completed! \nAll %d / %d files are saved to %s\n", successCount, len(files), dstDir)
 		},
 	}
 
