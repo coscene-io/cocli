@@ -15,47 +15,16 @@
 package api_utils
 
 import (
-	"context"
-	"crypto/tls"
-	"net"
 	"net/http"
-	"net/url"
 	"time"
 
-	"github.com/pkg/errors"
+	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 )
 
-// NewConnectClient creates a new http client for connecting to the given endpoint.
-func NewConnectClient(endpoint string) (*http.Client, error) {
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return nil, err
-	}
-	switch u.Scheme {
-	case "https":
-		return newSecureClient(), nil
-	case "http":
-		return newInsecureClient(), nil
-	default:
-		return nil, errors.Errorf("unsupported protocol: %s", u.Scheme)
-	}
-}
-
-func newSecureClient() *http.Client {
-	return http.DefaultClient
-}
-
-func newInsecureClient() *http.Client {
+func NewConnectClient() connect.HTTPClient {
 	return &http.Client{
 		Transport: &http2.Transport{
-			AllowHTTP: true,
-			DialTLSContext: func(context context.Context, network, addr string, _ *tls.Config) (net.Conn, error) {
-				// If you're also using this client for non-h2c traffic, you may want
-				// to delegate to tls.Dial if the network isn't TCP or the addr isn't
-				// in an allowlist.
-				return net.Dial(network, addr)
-			},
 			PingTimeout:      3 * time.Second,
 			ReadIdleTimeout:  3 * time.Second,
 			WriteByteTimeout: 3 * time.Second,

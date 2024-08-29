@@ -20,7 +20,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/fs"
@@ -79,13 +78,13 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 			} else {
 				log.Errorf("unable to get record url: %v", err)
 			}
-			fmt.Printf("Saving to %s\n\n", dstDir)
+			fmt.Printf("Saving to %s\n", dstDir)
 
 			successCount := 0
-			for _, f := range files {
+			for fIdx, f := range files {
 				fileName, _ := name.NewFile(f.Name)
 				localPath := filepath.Join(dstDir, fileName.Filename)
-				fmt.Printf("Downloading %dth file: %s\n", successCount+1, fileName.Filename)
+				fmt.Printf("\nDownloading #%d file: %s\n", fIdx+1, fileName.Filename)
 
 				if !strings.HasPrefix(localPath, dstDir+string(os.PathSeparator)) {
 					log.Errorf("illegal file name: %s", fileName.Filename)
@@ -100,7 +99,7 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 						continue
 					}
 					if checksum == f.Sha256 && size == f.Size {
-						fmt.Printf("File %s already exists, skipping.\n\n", fileName.Filename)
+						fmt.Printf("File %s already exists, skipping.\n", fileName.Filename)
 						continue
 					}
 				}
@@ -113,32 +112,15 @@ func NewDownloadCommand(cfgPath *string) *cobra.Command {
 				}
 
 				// Download file with #maxRetries retries
-				curTry := 1
-				for curTry <= maxRetries {
-					if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl, curTry != 1); err == nil {
-						successCount++
-						postfix := ""
-						if curTry > 1 {
-							postfix = fmt.Sprintf(" (after %d tries)", curTry)
-						}
-						fmt.Printf("File successfully downloaded!%s\n", postfix)
-						break
-					}
-					log.Errorf("unable to download file %s (try #%d): %v", fileName.Filename, curTry, err)
-					curTry++
-
-					if curTry <= maxRetries {
-						time.Sleep(3 * time.Second)
-					}
+				if err = cmd_utils.DownloadFileThroughUrl(localPath, downloadUrl, maxRetries); err != nil {
+					log.Errorf("download file %s failed: %v\n", fileName.Filename, err)
+					continue
 				}
 
-				if curTry > maxRetries {
-					log.Errorf("failed to download file %s after %d tries", fileName.Filename, maxRetries)
-				}
-				fmt.Println()
+				successCount++
 			}
 
-			fmt.Printf("Download completed! \nAll %d files are saved to %s\n", successCount, dstDir)
+			fmt.Printf("\nDownload completed! \nAll %d / %d files are saved to %s\n", successCount, len(files), dstDir)
 		},
 	}
 

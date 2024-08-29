@@ -17,6 +17,7 @@ package upload_utils
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/muesli/reflow/wordwrap"
@@ -26,11 +27,14 @@ type manualQuit interface {
 	Quit() bool
 }
 
-func NewUploadStatusMonitor(hidden bool) tea.Model {
+// NewUploadStatusMonitor is used to create a new upload status monitor, note that
+// uploadStatusMap and orderedFileList are used to maintain the state of the monitor
+// and will change as the underlying map/list changes.
+func NewUploadStatusMonitor(uploadStatusMap map[string]*FileInfo, orderedFileList *[]string, hidden bool) tea.Model {
 	if !hidden {
 		return &UploadStatusMonitor{
-			uploadStatusMap: make(map[string]*uploadStatus),
-			orderedFileList: []string{},
+			uploadStatusMap: uploadStatusMap,
+			orderedFileList: orderedFileList,
 			windowWidth:     0,
 		}
 	}
@@ -40,10 +44,10 @@ func NewUploadStatusMonitor(hidden bool) tea.Model {
 // UploadStatusMonitor is a bubbletea model that is used to monitor the progress of file uploads
 type UploadStatusMonitor struct {
 	// orderedFileList is used to maintain the order of the files
-	orderedFileList []string
+	orderedFileList *[]string
 
 	// uploadStatusMap is the source of truth for the progress of each file
-	uploadStatusMap map[string]*uploadStatus
+	uploadStatusMap map[string]*FileInfo
 
 	// windowWidth is used to calculate the width of the terminal
 	windowWidth int
@@ -51,62 +55,23 @@ type UploadStatusMonitor struct {
 	ManualQuit bool
 }
 
-// AddFileMsg is a message that is used to add a file to the upload status monitor
-type AddFileMsg struct {
-	Name string
-}
-
-type CanUpdateStatus interface {
-	UpdateStatus(m *UploadStatusMonitor)
-}
-
-func (msg AddFileMsg) UpdateStatus(m *UploadStatusMonitor) {
-	m.orderedFileList = append(m.orderedFileList, msg.Name)
-	m.uploadStatusMap[msg.Name] = &uploadStatus{
-		total:    0,
-		uploaded: 0,
-		status:   Unprocessed,
-	}
-}
-
-type UpdateStatusMsg struct {
-	Name     string
-	Total    int64
-	Uploaded int64
-	Status   UploadStatusEnum
-}
-
-func (msg UpdateStatusMsg) UpdateStatus(m *UploadStatusMonitor) {
-	if msg.Total > 0 {
-		m.uploadStatusMap[msg.Name].total = msg.Total
-	}
-	if msg.Uploaded > 0 {
-		m.uploadStatusMap[msg.Name].uploaded += msg.Uploaded
-	}
-	if msg.Status != Unprocessed {
-		m.uploadStatusMap[msg.Name].status = msg.Status
-	}
-}
-
 // calculateUploadProgress is used to calculate the progress of a file upload
 func (m *UploadStatusMonitor) calculateUploadProgress(name string) float64 {
 	status := m.uploadStatusMap[name]
-	if status.total == 0 {
+	if status.Size == 0 {
 		return 100
 	}
-	return float64(status.uploaded) * 100 / float64(status.total)
+	return float64(status.Uploaded) * 100 / float64(status.Size)
 }
 
 func (m *UploadStatusMonitor) Init() tea.Cmd {
-	return nil
+	return tick()
 }
 
 func (m *UploadStatusMonitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.windowWidth = msg.Width
-	case CanUpdateStatus:
-		msg.UpdateStatus(m)
 	case tea.QuitMsg:
 		return m, tea.Quit
 	case tea.KeyMsg:
@@ -115,6 +80,8 @@ func (m *UploadStatusMonitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.ManualQuit = true
 			return m, tea.Quit
 		}
+	case TickMsg:
+		return m, tick()
 	}
 	return m, nil
 }
@@ -123,10 +90,10 @@ func (m *UploadStatusMonitor) View() string {
 	s := "Upload Status:\n"
 	skipCount := 0
 	successCount := 0
-	for _, k := range m.orderedFileList {
+	for _, k := range *m.orderedFileList {
 		// Check if the file has been uploaded before
 		statusStrLen := m.windowWidth - len(k) - 1
-		switch m.uploadStatusMap[k].status {
+		switch m.uploadStatusMap[k].Status {
 		case Unprocessed:
 			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Preparing for upload")
 		case PreviouslyUploaded:
@@ -151,47 +118,25 @@ func (m *UploadStatusMonitor) View() string {
 
 	// Add summary of all file status
 	s += "\n"
-	s += fmt.Sprintf("Total: %d, Skipped: %d, Success: %d", len(m.orderedFileList), skipCount, successCount)
-	if successCount+skipCount < len(m.orderedFileList) {
-		s += fmt.Sprintf(", Remaining: %d", len(m.orderedFileList)-successCount-skipCount)
+	s += fmt.Sprintf("Total: %d, Skipped: %d, Success: %d", len(*m.orderedFileList), skipCount, successCount)
+	if successCount+skipCount < len(*m.orderedFileList) {
+		s += fmt.Sprintf(", Remaining: %d", len(*m.orderedFileList)-successCount-skipCount)
 	}
 	s += "\n"
 	s = wordwrap.String(s, m.windowWidth)
 	return s
 }
 
-func (m *UploadStatusMonitor) Quit() bool {
-	return m.ManualQuit
+type TickMsg time.Time
+
+func tick() tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return TickMsg(t)
+	})
 }
 
-// UploadStatusEnum is used to keep track of the state of a file upload
-type UploadStatusEnum int
-
-const (
-	// Unprocessed is used to indicate that the file has not been processed yet
-	Unprocessed UploadStatusEnum = iota
-
-	// PreviouslyUploaded is used to indicate that the file has been uploaded before
-	PreviouslyUploaded
-
-	// UploadInProgress is used to indicate that the file upload is in progress
-	UploadInProgress
-
-	// UploadCompleted is used to indicate that the file upload has completed
-	UploadCompleted
-
-	// MultipartCompletionInProgress is used to indicate that the multipart upload completion is in progress
-	MultipartCompletionInProgress
-
-	// UploadFailed is used to indicate that the file upload has failed
-	UploadFailed
-)
-
-// uploadStatus is used to keep track of the progress of a file upload
-type uploadStatus struct {
-	total    int64
-	uploaded int64
-	status   UploadStatusEnum
+func (m *UploadStatusMonitor) Quit() bool {
+	return m.ManualQuit
 }
 
 type DummyMonitor struct {

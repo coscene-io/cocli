@@ -20,8 +20,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+)
+
+const (
+	retryWaitMin = 1 * time.Second
+	retryWaitMax = 5 * time.Second
 )
 
 // Progress is a simple struct to keep track of the progress of a file upload/download
@@ -29,7 +37,7 @@ type Progress struct {
 	PrintPrefix string
 	TotalSize   int64
 	BytesRead   int64
-	IsRetry     bool
+	Retry       int
 }
 
 // Write is used to satisfy the io.Writer interface.
@@ -46,13 +54,17 @@ func (pr *Progress) Write(p []byte) (n int, err error) {
 // each time Write is called
 func (pr *Progress) Print() {
 	if pr.BytesRead == pr.TotalSize {
-		fmt.Print("\r\033[K")
+		postFix := ""
+		if pr.Retry > 0 {
+			postFix = fmt.Sprintf("on %d retries", pr.Retry)
+		}
+		fmt.Printf("\r\033[KFile successfully downloaded %s\n", postFix)
 		return
 	}
 
 	retryHint := ""
-	if pr.IsRetry {
-		retryHint = "(Retry) "
+	if pr.Retry > 0 {
+		retryHint = fmt.Sprintf("(Retry #%d) ", pr.Retry)
 	}
 	fmt.Printf("\r\033[K%s%s: %d/%d %d%%", retryHint, pr.PrintPrefix, pr.BytesRead, pr.TotalSize, 100*pr.BytesRead/pr.TotalSize)
 }
@@ -60,9 +72,7 @@ func (pr *Progress) Print() {
 // DownloadFileThroughUrl downloads a single file from the given downloadUrl.
 // file is the absolute path of the file to be downloaded.
 // downloadUrl is the pre-signed url to download the file from.
-func DownloadFileThroughUrl(file string, downloadUrl string, isRetry bool) error {
-	defer fmt.Print("\r\033[K")
-
+func DownloadFileThroughUrl(file string, downloadUrl string, maxRetries int) error {
 	err := os.MkdirAll(filepath.Dir(file), 0755)
 	if err != nil {
 		return errors.Wrapf(err, "unable to create directories for file %v", file)
@@ -74,6 +84,39 @@ func DownloadFileThroughUrl(file string, downloadUrl string, isRetry bool) error
 	}
 	defer func() { _ = fileWriter.Close() }()
 
+	var attempt int
+
+	operation := func() error {
+		opErr := downloadWithFileWriter(fileWriter, downloadUrl, attempt)
+		if opErr != nil {
+			retryPrefix := ""
+			if attempt > 0 {
+				retryPrefix = fmt.Sprintf("(Retry #%d) ", attempt)
+			}
+			log.Errorf("%sUnable to download file: %v", retryPrefix, opErr)
+		}
+		attempt++
+		return opErr
+	}
+
+	retry := backoff.WithMaxRetries(backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(retryWaitMin),
+		backoff.WithMaxInterval(retryWaitMax),
+		backoff.WithMultiplier(2),
+	), uint64(maxRetries))
+
+	if err = backoff.Retry(operation, retry); err != nil {
+		return errors.Wrapf(err, "unable to download file %v after %d retries", file, maxRetries)
+	}
+
+	return nil
+}
+
+// downloadWithFileWriter downloads the file from the given downloadUrl and writes it to the fileWriter.
+// It also updates the progress of the download.
+func downloadWithFileWriter(fileWriter *os.File, downloadUrl string, retry int) error {
+	defer fmt.Print("\r\033[K")
+
 	resp, err := http.Get(downloadUrl)
 	if err != nil {
 		return errors.Wrapf(err, "unable to get file from url %v", downloadUrl)
@@ -84,14 +127,14 @@ func DownloadFileThroughUrl(file string, downloadUrl string, isRetry bool) error
 		PrintPrefix: "File download in progress",
 		TotalSize:   resp.ContentLength,
 		BytesRead:   0,
-		IsRetry:     isRetry,
+		Retry:       retry,
 	}
 
 	tee := io.TeeReader(resp.Body, progress)
 
 	_, err = io.Copy(fileWriter, tee)
 	if err != nil {
-		return errors.Wrapf(err, "unable to write file %v", file)
+		return errors.Wrapf(err, "unable to write file %v", fileWriter.Name())
 	}
 
 	return nil
