@@ -22,7 +22,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/hashicorp/go-retryablehttp"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
@@ -84,24 +84,32 @@ func DownloadFileThroughUrl(file string, downloadUrl string, maxRetries int) err
 	}
 	defer func() { _ = fileWriter.Close() }()
 
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		err = downloadWithFileWriter(fileWriter, downloadUrl, attempt)
-		if err == nil {
-			return nil
-		}
+	var attempt int
 
-		retryPrefix := ""
-		if attempt > 0 {
-			retryPrefix = fmt.Sprintf("(Retry #%d) ", attempt)
+	operation := func() error {
+		opErr := downloadWithFileWriter(fileWriter, downloadUrl, attempt)
+		if opErr != nil {
+			retryPrefix := ""
+			if attempt > 0 {
+				retryPrefix = fmt.Sprintf("(Retry #%d) ", attempt)
+			}
+			log.Errorf("%sUnable to download file: %v", retryPrefix, opErr)
 		}
-		log.Errorf("%sUnable to download file: %v", retryPrefix, err)
-
-		if attempt < maxRetries {
-			time.Sleep(retryablehttp.DefaultBackoff(retryWaitMin, retryWaitMax, attempt, nil))
-		}
+		attempt++
+		return opErr
 	}
 
-	return errors.Errorf("unable to download file %v after %d retries", file, maxRetries)
+	retry := backoff.WithMaxRetries(backoff.NewExponentialBackOff(
+		backoff.WithInitialInterval(retryWaitMin),
+		backoff.WithMaxInterval(retryWaitMax),
+		backoff.WithMultiplier(2),
+	), uint64(maxRetries))
+
+	if err = backoff.Retry(operation, retry); err != nil {
+		return errors.Wrapf(err, "unable to download file %v after %d retries", file, maxRetries)
+	}
+
+	return nil
 }
 
 // downloadWithFileWriter downloads the file from the given downloadUrl and writes it to the fileWriter.

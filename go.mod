@@ -7,6 +7,7 @@ require (
 	buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go v1.34.2-20240717055603-ba6d97632160.2
 	connectrpc.com/connect v1.16.2
 	dario.cat/mergo v1.0.0
+	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/charmbracelet/bubbletea v0.25.0
 	github.com/deckarep/golang-set/v2 v2.6.0
 	github.com/dustin/go-humanize v1.0.1

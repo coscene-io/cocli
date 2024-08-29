@@ -19,30 +19,44 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
-	"github.com/hashicorp/go-retryablehttp"
+	"github.com/cenkalti/backoff/v4"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
+)
+
+const (
+	retryWaitMin = 1 * time.Second
+	retryWaitMax = 5 * time.Second
 )
 
 // UnaryRetryInterceptor returns a UnaryInterceptorFunc that retries the request up to retryMax times.
 func UnaryRetryInterceptor(retryMax int) connect.UnaryInterceptorFunc {
 	return func(next connect.UnaryFunc) connect.UnaryFunc {
-		retryWaitMin := 1 * time.Second
-		retryWaitMax := 5 * time.Second
-
 		return func(
 			ctx context.Context,
 			req connect.AnyRequest,
 		) (connect.AnyResponse, error) {
-			var resp connect.AnyResponse
-			var err error
-			for attempt := 0; attempt <= retryMax; attempt++ {
-				resp, err = next(ctx, req)
+			operation := func() (connect.AnyResponse, error) {
+				resp, err := next(ctx, req)
 				if noNeedRetry(err) {
-					return resp, nil
+					return resp, backoff.Permanent(err)
 				}
-				time.Sleep(retryablehttp.DefaultBackoff(retryWaitMin, retryWaitMax, attempt, nil))
+				return resp, err
 			}
+
+			retry := backoff.WithMaxRetries(backoff.NewExponentialBackOff(
+				backoff.WithInitialInterval(retryWaitMin),
+				backoff.WithMaxInterval(retryWaitMax),
+				backoff.WithMultiplier(2),
+			), uint64(retryMax))
+
+			resp, err := backoff.RetryWithData(operation, retry)
+
+			// Directly return if no error or the error is not retryable.
+			if noNeedRetry(err) {
+				return resp, err
+			}
+
 			return resp, errors.Wrapf(err, "retry failed after %d attempts", retryMax)
 		}
 	}
