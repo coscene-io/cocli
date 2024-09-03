@@ -19,15 +19,18 @@ var (
 )
 
 type MultipartOpts struct {
-	Threads uint
-	Size    string
+	Threads    int
+	Size       string
+	sizeUint64 uint64
 }
 
 func (opt *MultipartOpts) Valid() error {
-	if _, err := opt.partSize(); err != nil {
+	if sizeUint64, err := opt.partSize(); err != nil {
 		return errors.Wrap(err, "parse part size")
+	} else {
+		opt.sizeUint64 = sizeUint64
+		return nil
 	}
-	return nil
 }
 
 func (opt *MultipartOpts) partSize() (uint64, error) {
@@ -42,11 +45,18 @@ type FileOpts struct {
 	relDir        string
 	Recursive     bool
 	IncludeHidden bool
+
+	// Additional mapping from file path to oss path
+	AdditionalUploads map[string]string
 }
 
 func (opt *FileOpts) Valid() error {
+	if opt.Path == "" && len(opt.AdditionalUploads) == 0 {
+		return errors.New("file path empty")
+	}
+
 	if opt.Path == "" {
-		return errors.New("file path not empty")
+		return nil
 	}
 
 	opt.relDir = opt.Path

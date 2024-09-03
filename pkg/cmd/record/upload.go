@@ -85,7 +85,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().BoolVarP(&isRecursive, "recursive", "R", false, "upload files in the current directory recursively")
 	cmd.Flags().BoolVarP(&includeHidden, "include-hidden", "H", false, "include hidden files (\"dot\" files) in the upload")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
-	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
+	cmd.Flags().IntVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
 	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 

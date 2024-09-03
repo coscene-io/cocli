@@ -24,7 +24,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,14 +41,13 @@ import (
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	log "github.com/sirupsen/logrus"
+	bolt "go.etcd.io/bbolt"
 	"golang.org/x/exp/slices"
 )
 
 const (
 	userTagRecordIdKey     = "X-COS-RECORD-ID"
-	uploadIdKey            = "STORE-KEY-UPLOAD-ID"
-	uploadedSizeKey        = "STORE-KEY-UPLOADED-SIZE"
-	partsKey               = "STORE-KEY-PARTS"
+	mutipartUploadInfoKey  = "STORE-KEY-MUTIPART-UPLOAD-INFO"
 	maxSinglePutObjectSize = 1024 * 1024 * 1024 * 500 // 500GiB
 	defaultWindowSize      = 1024 * 1024 * 1024       // 1GiB
 	processBatchSize       = 20
@@ -87,6 +85,34 @@ type FileInfo struct {
 	Status   UploadStatusEnum
 }
 
+// UploadInfo contains the information needed to upload a file or a file part (multipart upload).
+type UploadInfo struct {
+	Path   string
+	Bucket string
+	Key    string
+	Tags   map[string]string
+
+	// Upload result infos
+	Result minio.ObjectPart
+	Err    error
+
+	// Multipart info
+	UploadId        string
+	PartId          int
+	TotalPartsCount int
+	ReadOffset      int64
+	ReadSize        int64
+	FileReader      *os.File
+	DB              *UploadDB
+}
+
+// MultipartCheckpointInfo contains the information needed to resume a multipart upload.
+type MultipartCheckpointInfo struct {
+	UploadId     string               `json:"upload_id"`
+	UploadedSize int64                `json:"uploaded_size"`
+	Parts        []minio.CompletePart `json:"parts"`
+}
+
 // UploadManager is a manager for uploading files through minio client.
 type UploadManager struct {
 	// client and opts
@@ -97,7 +123,7 @@ type UploadManager struct {
 	// file status related
 	fileInfos map[string]*FileInfo
 	fileList  []string
-	filesWg   sync.WaitGroup
+	uploadWg  sync.WaitGroup
 
 	// Monitor related
 	windowWidth int
@@ -165,32 +191,428 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 
 	// Send an empty message to wait for the monitor to start
 	um.monitor.Send(struct{}{})
+	um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
 
-	files := fs.GenerateFiles(fileOpts.Path, fileOpts.Recursive, fileOpts.IncludeHidden)
-	fileUploadUrlBatches := um.generateUploadUrlBatches(files, rcd, fileOpts.relDir)
+	filesToUpload := fs.FindFiles(fileOpts.Path, fileOpts.Recursive, fileOpts.IncludeHidden)
+	um.uploadWg.Add(len(filesToUpload) + len(fileOpts.AdditionalUploads))
 
-	for fileUploadUrls := range fileUploadUrlBatches {
-		for fileResourceName, uploadUrl := range fileUploadUrls {
-			fileResource, err := name.NewFile(fileResourceName)
-			if err != nil {
-				um.addErr(fileResourceName, errors.Wrapf(err, "unable to parse file resource name"))
-				continue
-			}
-
-			fileAbsolutePath := filepath.Join(fileOpts.relDir, fileResource.Filename)
-
-			if err = um.UploadFileThroughUrl(fileAbsolutePath, uploadUrl); err != nil {
-				um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to upload file"))
-				continue
-			}
+	fileToUploadUrls := um.findAllUploadUrls(filesToUpload, rcd, fileOpts.relDir)
+	for f, v := range fileOpts.AdditionalUploads {
+		fileToUploadUrls[f] = v
+		um.addFile(f)
+		checksum, size, err := fs.CalSha256AndSize(f)
+		if err != nil {
+			um.addErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
+			continue
 		}
+		um.fileInfos[f].Size = size
+		um.fileInfos[f].Sha256 = checksum
 	}
 
-	um.filesWg.Wait()
+	// Declare a channel that sends the next upload info to be processed
+	uploadCh := make(chan UploadInfo)
+	// Declare a channel that receives the result of the upload
+	uploadResultCh := make(chan UploadInfo)
+
+	// Start the upload workers
+	for i := 0; i < um.opts.Threads; i++ {
+		go func() {
+			for {
+				uploadInfo, ok := <-uploadCh
+				um.debugF("Worker %d received upload task with path: %s, part id: %d", i, uploadInfo.Path, uploadInfo.PartId)
+				if !ok {
+					return
+				}
+				if uploadInfo.UploadId == "" {
+					uploadInfo.Err = um.consumeSingleUploadInfo(ctx, uploadInfo)
+				} else {
+					uploadInfo.Result, uploadInfo.Err = um.consumeMultipartUploadInfo(ctx, uploadInfo)
+				}
+
+				uploadResultCh <- uploadInfo
+			}
+		}()
+	}
+
+	uploadInfos := um.produceUploadInfos(ctx, fileToUploadUrls, fileOpts.relDir)
+	go um.scheduleUploads(ctx, uploadInfos, uploadCh, uploadResultCh, um.opts.Threads)
+	um.uploadWg.Wait()
+
 	um.monitor.Quit()
 	monitorCompleteWg.Wait()
 
 	return nil
+}
+
+// produceUploadInfos is a producer of upload infos for each file to be uploaded.
+func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrls map[string]string, relDir string) <-chan UploadInfo {
+	ret := make(chan UploadInfo)
+	go func() {
+		defer close(ret)
+		for _, fileAbsolutePath := range um.fileList {
+			uploadUrl, ok := fileToUploadUrls[fileAbsolutePath]
+			if !ok {
+				continue
+			}
+
+			bucket, key, tags, err := um.parseUrl(uploadUrl)
+			if err != nil {
+				um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to parse upload url"))
+				continue
+			}
+
+			fileInfo := um.fileInfos[fileAbsolutePath]
+
+			if fileInfo.Size <= int64(um.opts.sizeUint64) {
+				ret <- UploadInfo{
+					Path:   fileAbsolutePath,
+					Bucket: bucket,
+					Key:    key,
+					Tags:   tags,
+				}
+			} else {
+				multipartUploadInfo, err := um.produceMultipartUploadInfos(ctx, fileAbsolutePath, bucket, key, tags)
+				if err != nil {
+					um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to produce multipart upload infos"))
+					continue
+				}
+				for _, info := range multipartUploadInfo {
+					ret <- info
+				}
+			}
+		}
+	}()
+
+	return ret
+}
+
+func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAbsolutePath string, bucket string, key string, tags map[string]string) (uploadInfos []UploadInfo, err error) {
+	fileInfo := um.fileInfos[fileAbsolutePath]
+
+	// Check for largest object size allowed.
+	if fileInfo.Size > int64(maxSinglePutObjectSize) {
+		return nil, errors.Errorf("Your proposed upload size ‘%d’ exceeds the maximum allowed object size ‘%d’ for single PUT operation.", fileInfo.Size, maxSinglePutObjectSize)
+	}
+
+	// Create uploader directory if not exists
+	if err = os.MkdirAll(constants.DefaultUploaderDirPath, 0755); err != nil {
+		return nil, errors.Wrap(err, "Create uploader directory failed")
+	}
+
+	// Create uploader db
+	db, err := NewUploadDB(fileAbsolutePath, tags[userTagRecordIdKey], fileInfo.Sha256)
+	if err != nil {
+		return nil, errors.Wrap(err, "Create uploader db failed")
+	}
+
+	c := minio.Core{Client: um.client}
+	// ----------------- Start fetching previous upload info from db -----------------
+	// Fetch upload id. If not found, initiate a new multipart upload.
+	var checkpoint MultipartCheckpointInfo
+	if err = db.Get(mutipartUploadInfoKey, &checkpoint); err != nil {
+		um.debugF("Get checkpoint failed: %v", err)
+		checkpoint = MultipartCheckpointInfo{}
+	}
+
+	// Fetch upload id. If not found, initiate a new multipart upload.
+	if checkpoint.UploadId != "" {
+		um.debugF("Upload id: %s is found in db", checkpoint.UploadId)
+
+		// Check if the upload id is still valid
+		result, err := c.ListObjectParts(ctx, bucket, key, checkpoint.UploadId, 0, 2000)
+		if err != nil || len(result.ObjectParts) == 0 {
+			um.debugF("List object parts by: %s failed: %v", checkpoint.UploadId, err)
+			checkpoint.UploadId = ""
+			if err = db.Reset(); err != nil {
+				return nil, errors.Wrap(err, "Reset db failed")
+			}
+		} else {
+			um.debugF("Upload id: %s is still valid", checkpoint.UploadId)
+		}
+	}
+
+	if checkpoint.UploadId == "" {
+		// first reset checkpoint
+		checkpoint = MultipartCheckpointInfo{}
+		checkpoint.UploadId, err = c.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{
+			UserTags: tags,
+			PartSize: um.opts.sizeUint64,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "New multipart upload failed")
+		}
+	}
+
+	partNumbers := lo.Map(checkpoint.Parts, func(p minio.CompletePart, _ int) int {
+		return p.PartNumber
+	})
+	sort.Ints(partNumbers)
+	um.debugF("Get upload id: %s", checkpoint.UploadId)
+	um.debugF("Get uploaded size: %d", checkpoint.UploadedSize)
+	um.debugF("Get uploaded parts: %v", partNumbers)
+
+	// ----------------- End fetching previous upload info from db -----------------
+	// Calculate the optimal parts info for a given size.
+	totalPartsCount, partSize, lastPartSize, err := minio.OptimalPartInfo(fileInfo.Size, um.opts.sizeUint64)
+	if err != nil {
+		return nil, errors.Wrap(err, "Optimal part info failed")
+	}
+	um.debugF("Total part: %v, part size: %v, last part size: %v", totalPartsCount, partSize, lastPartSize)
+
+	// Get reader of the file to be uploaded.
+	fileReader, err := os.Open(fileAbsolutePath)
+	if err != nil {
+		return nil, errors.Wrap(err, "Open file failed")
+	}
+
+	// Compute remaining parts to upload.
+	for partId := 1; partId <= totalPartsCount; partId++ {
+		if slices.Contains(partNumbers, partId) {
+			continue
+		}
+
+		readSize := partSize
+		if partId == totalPartsCount {
+			readSize = lastPartSize
+		}
+		uploadInfos = append(uploadInfos, UploadInfo{
+			Path:            fileAbsolutePath,
+			Bucket:          bucket,
+			Key:             key,
+			Tags:            tags,
+			UploadId:        checkpoint.UploadId,
+			PartId:          partId,
+			TotalPartsCount: totalPartsCount,
+			ReadOffset:      int64(partId-1) * partSize,
+			ReadSize:        readSize,
+			FileReader:      fileReader,
+			DB:              db,
+		})
+	}
+
+	um.fileInfos[fileAbsolutePath].Uploaded = checkpoint.UploadedSize
+	um.fileInfos[fileAbsolutePath].Status = UploadInProgress
+	return uploadInfos, nil
+}
+
+func (um *UploadManager) scheduleUploads(ctx context.Context, uploadInfos <-chan UploadInfo, uploadCh chan<- UploadInfo, uploadResultCh <-chan UploadInfo, numThread int) {
+	uploadInfoInProgress := make([]UploadInfo, 0)
+	var previousUploadInfo *UploadInfo
+
+	for {
+		for i := len(uploadInfoInProgress) + 1; i <= numThread; i++ {
+			// If there is a previous upload info, try to upload it first.
+			if previousUploadInfo != nil {
+				if um.canUpload(*previousUploadInfo, uploadInfoInProgress) {
+					uploadCh <- *previousUploadInfo
+					uploadInfoInProgress = append(uploadInfoInProgress, *previousUploadInfo)
+					previousUploadInfo = nil
+					continue
+				} else {
+					break
+				}
+			}
+			if uploadInfo, ok := <-uploadInfos; ok {
+				if um.canUpload(uploadInfo, uploadInfoInProgress) {
+					uploadCh <- uploadInfo
+					uploadInfoInProgress = append(uploadInfoInProgress, uploadInfo)
+				} else {
+					previousUploadInfo = &uploadInfo
+					break
+				}
+			}
+		}
+
+		result := <-uploadResultCh
+
+		uploadInfoInProgress = lo.Filter(uploadInfoInProgress, func(info UploadInfo, _ int) bool {
+			return info.Path != result.Path || info.PartId != result.PartId
+		})
+
+		if um.fileInfos[result.Path].Status == UploadFailed {
+			// Skip if some other part of the same file has failed.
+			continue
+		}
+
+		if err := um.handleUploadResult(result); err != nil {
+			um.debugF("Handle upload result failed: %v", err)
+
+			// todo: retry, abort remaining parts on error, etc.
+			um.addErr(result.Path, err)
+		}
+	}
+}
+
+func (um *UploadManager) handleUploadResult(result UploadInfo) error {
+	// On error result
+	if result.Err != nil {
+		return result.Err
+	}
+
+	// On success single upload
+	if result.UploadId == "" {
+		um.fileInfos[result.Path].Status = UploadCompleted
+		um.uploadWg.Done()
+		return nil
+	}
+
+	// On success multipart upload
+	var checkpoint MultipartCheckpointInfo
+	if err := result.DB.Update(func(tx *bolt.Tx) error {
+		bucket := tx.Bucket([]byte(multipartUploadsBucket))
+		value := bucket.Get([]byte(mutipartUploadInfoKey))
+
+		if value == nil {
+			checkpoint = MultipartCheckpointInfo{
+				UploadId: result.UploadId,
+			}
+		} else {
+			if err := json.Unmarshal(value, &checkpoint); err != nil {
+				return errors.Wrap(err, "unmarshal checkpoint info")
+			}
+		}
+
+		checkpoint.UploadId = result.UploadId
+		checkpoint.UploadedSize += result.ReadSize
+		checkpoint.Parts = append(checkpoint.Parts, minio.CompletePart{
+			PartNumber:     result.Result.PartNumber,
+			ETag:           result.Result.ETag,
+			ChecksumCRC32:  result.Result.ChecksumCRC32,
+			ChecksumCRC32C: result.Result.ChecksumCRC32C,
+			ChecksumSHA1:   result.Result.ChecksumSHA1,
+			ChecksumSHA256: result.Result.ChecksumSHA256,
+		})
+		checkpointBytes, err := json.Marshal(checkpoint)
+		if err != nil {
+			return errors.Wrap(err, "marshal checkpoint info")
+		}
+
+		return bucket.Put([]byte(mutipartUploadInfoKey), checkpointBytes)
+	}); err != nil {
+		return errors.Wrapf(err, "update checkpoint info failed for %s", result.Path)
+	}
+
+	// Check if multipart upload is completed
+	if len(checkpoint.Parts) == result.TotalPartsCount {
+		defer func(DB *UploadDB) {
+			if err := DB.Delete(); err != nil {
+				um.debugF("Delete db failed: %v", err)
+			}
+		}(result.DB)
+		defer func(FileReader *os.File) {
+			if err := FileReader.Close(); err != nil {
+				um.debugF("Close file failed: %v", err)
+			}
+		}(result.FileReader)
+
+		um.fileInfos[result.Path].Status = MultipartCompletionInProgress
+
+		slices.SortFunc(checkpoint.Parts, func(i, j minio.CompletePart) int {
+			return i.PartNumber - j.PartNumber
+		})
+
+		opts := minio.PutObjectOptions{
+			UserTags: result.Tags,
+		}
+		if opts.ContentType = mime.TypeByExtension(filepath.Ext(result.Path)); opts.ContentType == "" {
+			opts.ContentType = "application/octet-stream"
+		}
+
+		_, err := minio.Core{Client: um.client}.CompleteMultipartUpload(context.Background(), result.Bucket, result.Key, result.UploadId, checkpoint.Parts, opts)
+		if err != nil {
+			return errors.Wrap(err, "complete multipart upload failed")
+		}
+
+		um.fileInfos[result.Path].Status = UploadCompleted
+		um.uploadWg.Done()
+	}
+
+	return nil
+}
+
+// canUpload checks if the upload candidate is allowed to upload.
+// It basically checks if the upload candidate is a multipart upload and if the part id is within the window size
+// of the least in progress upload part id.
+func (um *UploadManager) canUpload(uploadCandidate UploadInfo, uploadInfoInProgress []UploadInfo) bool {
+	leastUploadingPartId := lo.Min(lo.FilterMap(uploadInfoInProgress, func(info UploadInfo, _ int) (int, bool) {
+		if info.Path == uploadCandidate.Path {
+			return info.PartId, true
+		} else {
+			return 0, false
+		}
+	}))
+
+	if leastUploadingPartId == 0 {
+		// Case 1: Single upload, no upload with the same path is in progress.
+		// Case 2: Multipart upload, no other parts are in progress.
+		// For both cases, we can upload directly.
+		return true
+	}
+
+	windowSize := defaultWindowSize
+	if windowSize < int(um.opts.sizeUint64) {
+		windowSize = int(um.opts.sizeUint64)
+	}
+	threshold := leastUploadingPartId + windowSize/int(um.opts.sizeUint64)
+
+	return uploadCandidate.PartId <= threshold
+}
+
+func (um *UploadManager) consumeSingleUploadInfo(ctx context.Context, uploadInfo UploadInfo) error {
+	um.fileInfos[uploadInfo.Path].Status = UploadInProgress
+	progress := &uploadProgressReader{
+		fileInfo: um.fileInfos[uploadInfo.Path],
+	}
+	if _, err := um.client.FPutObject(ctx, uploadInfo.Bucket, uploadInfo.Key, uploadInfo.Path, minio.PutObjectOptions{
+		Progress:         progress,
+		UserTags:         uploadInfo.Tags,
+		DisableMultipart: true,
+	}); err != nil {
+		return errors.Wrapf(err, "Put object failed")
+	}
+	return nil
+}
+
+func (um *UploadManager) consumeMultipartUploadInfo(ctx context.Context, uploadInfo UploadInfo) (minio.ObjectPart, error) {
+	sectionReader := &uploadProgressSectionReader{
+		SectionReader: io.NewSectionReader(uploadInfo.FileReader, uploadInfo.ReadOffset, uploadInfo.ReadSize),
+		fileInfo:      um.fileInfos[uploadInfo.Path],
+	}
+	um.debugF("Uploading part %d of %s", uploadInfo.PartId, uploadInfo.Path)
+
+	objPart, err := minio.Core{Client: um.client}.PutObjectPart(ctx, uploadInfo.Bucket, uploadInfo.Key, uploadInfo.UploadId, uploadInfo.PartId, sectionReader, uploadInfo.ReadSize, minio.PutObjectPartOptions{})
+	if err != nil {
+		um.debugF("Put object part %d of %s failed: %v", uploadInfo.PartId, uploadInfo.Path, err)
+	} else {
+		um.debugF("Put object part %d of %s succeeded", uploadInfo.PartId, uploadInfo.Path)
+	}
+	return objPart, err
+}
+
+// parseUrl parses the upload url to get the bucket, key and tags.
+func (um *UploadManager) parseUrl(uploadUrl string) (string, string, map[string]string, error) {
+	parsedUrl, err := url.Parse(uploadUrl)
+	if err != nil {
+		return "", "", nil, errors.Wrap(err, "parse upload url failed")
+	}
+
+	// Parse tags
+	tagsMap, err := url.ParseQuery(parsedUrl.Query().Get("X-Amz-Tagging"))
+	if err != nil {
+		return "", "", nil, errors.Wrap(err, "parse tags failed")
+	}
+	tags := lo.MapValues(tagsMap, func(value []string, _ string) string {
+		if len(value) == 0 {
+			return ""
+		}
+		return value[0]
+	})
+
+	// Parse bucket and key
+	pathParts := strings.SplitN(parsedUrl.Path, "/", 3)
+	bucket := pathParts[1]
+	key := pathParts[2]
+	return bucket, key, tags, nil
 }
 
 // addFile adds a file to the upload manager.
@@ -206,14 +628,17 @@ func (um *UploadManager) addFile(path string) {
 func (um *UploadManager) debugF(format string, args ...interface{}) {
 	if um.isDebug {
 		msg := fmt.Sprintf(format, args...)
-		um.monitor.Printf("DEBUG: %s\n", msg)
+		debugMsg := wordwrap.String(fmt.Sprintf("DEBUG: %s", msg), um.windowWidth)
+		um.monitor.Println(debugMsg)
 	}
 }
 
 // addErr adds an error to the manager.
 func (um *UploadManager) addErr(path string, err error) {
+	um.debugF("Upload %s failed with: %v", path, err)
 	um.fileInfos[path].Status = UploadFailed
 	um.errs[path] = err
+	um.uploadWg.Done()
 }
 
 // printErrs prints all errors.
@@ -227,418 +652,79 @@ func (um *UploadManager) printErrs() {
 	}
 }
 
-// UploadFileThroughUrl uploads a single file to the given uploadUrl.
-// um is the upload manager to use.
-// file is the absolute path of the file to be uploaded.
-// uploadUrl is the pre-signed url to upload the file to.
-func (um *UploadManager) UploadFileThroughUrl(file string, uploadUrl string) error {
-	parsedUrl, err := url.Parse(uploadUrl)
-	if err != nil {
-		return errors.Wrap(err, "parse upload url failed")
-	}
+func (um *UploadManager) findAllUploadUrls(filesToUpload []string, recordName *name.Record, relativeDir string) map[string]string {
+	ret := make(map[string]string)
+	var files []*openv1alpha1resource.File
 
-	// Parse tags
-	tagsMap, err := url.ParseQuery(parsedUrl.Query().Get("X-Amz-Tagging"))
-	if err != nil {
-		return errors.Wrap(err, "parse tags failed")
-	}
-	tags := lo.MapValues(tagsMap, func(value []string, _ string) string {
-		if len(value) == 0 {
-			return ""
-		}
-		return value[0]
-	})
-
-	// Parse bucket and key
-	if !strings.HasPrefix(parsedUrl.Path, "/default/") {
-		return errors.New("invalid upload url")
-	}
-	key := strings.TrimPrefix(parsedUrl.Path, "/default/")
-
-	um.fPutObject(file, "default", key, tags)
-	return nil
-}
-
-// fPutObject uploads a file to a bucket with a key and sha256.
-// If the file size is larger than minPartSize, it will use multipart upload.
-func (um *UploadManager) fPutObject(absPath string, bucket string, key string, userTags map[string]string) {
-	// Check if file sha256 matches.
-	fileInfo, ok := um.fileInfos[absPath]
-	if !ok {
-		um.addErr(absPath, errors.New("File info not found"))
-		return
-	}
-
-	um.filesWg.Add(1)
-	go func() {
-		defer um.filesWg.Done()
-		um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
-
-		size, err := um.opts.partSize()
+	for _, f := range filesToUpload {
+		um.addFile(f)
+		checksum, size, err := fs.CalSha256AndSize(f)
 		if err != nil {
-			um.addErr(absPath, err)
-			return
+			um.addErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
+			continue
 		}
+		um.fileInfos[f].Size = size
+		um.fileInfos[f].Sha256 = checksum
 
-		if fileInfo.Size > int64(size) {
-			err = um.fMultipartPutObject(context.Background(), bucket, key,
-				absPath, fileInfo.Size, fileInfo.Sha256, minio.PutObjectOptions{UserTags: userTags, PartSize: size, NumThreads: um.opts.Threads})
-		} else {
-			progress := &uploadProgressReader{
-				absPath:  absPath,
-				fileInfo: fileInfo,
-			}
-			um.fileInfos[absPath].Status = UploadInProgress
-			_, err = um.client.FPutObject(context.Background(), bucket, key, absPath,
-				minio.PutObjectOptions{Progress: progress, UserTags: userTags, DisableMultipart: true})
-		}
+		relativePath, err := filepath.Rel(relativeDir, f)
 		if err != nil {
-			um.addErr(absPath, err)
-		} else {
-			um.fileInfos[absPath].Status = UploadCompleted
+			um.addErr(f, errors.Wrapf(err, "unable to get relative path"))
+			continue
 		}
-	}()
-}
 
-// fMultipartPutObject uploads a file to a bucket with a key using multipart upload.
-func (um *UploadManager) fMultipartPutObject(ctx context.Context, bucket string, key string, filePath string, fileSize int64, fileSha256 string, opts minio.PutObjectOptions) (err error) {
-	// Check for largest object size allowed.
-	if fileSize > int64(maxSinglePutObjectSize) {
-		return errors.Errorf("Your proposed upload size ‘%d’ exceeds the maximum allowed object size ‘%d’ for single PUT operation.", fileSize, maxSinglePutObjectSize)
-	}
-
-	c := minio.Core{Client: um.client}
-
-	// Create uploader directory if not exists
-	if err = os.MkdirAll(constants.DefaultUploaderDirPath, 0755); err != nil {
-		return errors.Wrap(err, "Create uploader directory failed")
-	}
-
-	// Create uploader db
-	db, err := NewUploadDB(filePath, opts.UserTags[userTagRecordIdKey], fileSha256)
-	if err != nil {
-		return errors.Wrap(err, "Create uploader db failed")
-	}
-	defer db.Close()
-
-	// ----------------- Start fetching previous upload info from db -----------------
-	// Fetch upload id. If not found, initiate a new multipart upload.
-	var uploadId string
-	uploadIdBytes, err := db.Get(uploadIdKey)
-	if err != nil {
-		um.debugF("Get upload id by: %s warn: %v", uploadIdKey, err)
-	}
-	if uploadIdBytes != nil {
-		uploadId = string(uploadIdBytes)
-		result, err := c.ListObjectParts(ctx, bucket, key, uploadId, 0, 2000)
-		if err != nil || len(result.ObjectParts) == 0 {
-			um.debugF("List object parts by: %s failed: %v", uploadIdKey, err)
-			uploadId = ""
-			if err = db.Reset(); err != nil {
-				return errors.Wrap(err, "Reset db failed")
-			}
-		} else {
-			um.debugF("Upload id: %s is still valid", uploadId)
+		// Check if the file already exists in the record.
+		getFileRes, err := um.apiOpts.GetFile(context.TODO(), name.File{
+			ProjectID: recordName.ProjectID,
+			RecordID:  recordName.RecordID,
+			Filename:  relativePath,
+		}.String())
+		if err == nil && getFileRes.Sha256 == checksum && getFileRes.Size == size {
+			um.fileInfos[f].Status = PreviouslyUploaded
+			um.uploadWg.Done()
+			continue
 		}
-	}
-	if uploadId == "" {
-		uploadId, err = c.NewMultipartUpload(ctx, bucket, key, opts)
-		if err != nil {
-			return errors.Wrap(err, "New multipart upload failed")
-		}
-	}
-	um.debugF("Get upload id: %s by: %s", uploadId, uploadIdKey)
 
-	// Fetch uploaded size
-	var uploadedSize int64
-	uploadedSizeBytes, err := db.Get(uploadedSizeKey)
-	if err != nil {
-		um.debugF("Get uploaded size by: %s warn: %v", uploadedSizeKey, err)
-	}
-	if uploadedSizeBytes != nil {
-		uploadedSize, err = strconv.ParseInt(string(uploadedSizeBytes), 10, 64)
-		if err != nil {
-			uploadedSize = 0
-		}
-	} else {
-		uploadedSize = 0
-	}
-	um.debugF("Get uploaded size: %d by: %s", uploadedSize, uploadedSizeKey)
-
-	// Fetch uploaded parts
-	var parts []minio.CompletePart
-	partsBytes, err := db.Get(partsKey)
-	if err != nil {
-		um.debugF("Get uploaded parts by: %s warn: %v", partsKey, err)
-	}
-	if partsBytes != nil {
-		err = json.Unmarshal(partsBytes, &parts)
-		if err != nil {
-			parts = []minio.CompletePart{}
-		}
-	} else {
-		parts = []minio.CompletePart{}
-	}
-	partNumbers := lo.Map(parts, func(p minio.CompletePart, _ int) int {
-		return p.PartNumber
-	})
-	sort.Ints(partNumbers)
-	um.debugF("Get uploaded parts: %v by: %s", partNumbers, partsKey)
-	// ----------------- End fetching previous upload info from db -----------------
-
-	// todo(shuhao): should handle abort multipart upload on user interrupt.
-
-	// Set contentType based on filepath extension if not given or default
-	// value of "application/octet-stream" if the extension has no associated type.
-	if opts.ContentType == "" {
-		if opts.ContentType = mime.TypeByExtension(filepath.Ext(filePath)); opts.ContentType == "" {
-			opts.ContentType = "application/octet-stream"
-		}
-	}
-
-	// Calculate the optimal parts info for a given size.
-	totalPartsCount, partSize, lastPartSize, err := minio.OptimalPartInfo(fileSize, opts.PartSize)
-	if err != nil {
-		return errors.Wrap(err, "Optimal part info failed")
-	}
-	um.debugF("Total part: %v, part size: %v, last part size: %v", totalPartsCount, partSize, lastPartSize)
-
-	// Declare a channel that sends the next part number to be uploaded.
-	uploadPartsCh := make(chan int, opts.NumThreads)
-	// Declare a channel that sends back the response of a part upload.
-	uploadedPartsCh := make(chan uploadedPartRes, opts.NumThreads)
-	// Declare a channel that sends back the completed part numbers.
-	completedPartsCh := make(chan int, opts.NumThreads)
-
-	um.fileInfos[filePath].Uploaded = uploadedSize
-	um.fileInfos[filePath].Status = UploadInProgress
-
-	// Send each part number to the channel to be processed.
-	go func() {
-		defer close(uploadPartsCh)
-
-		windowSize := defaultWindowSize
-		// Make sure at least one part is uploading.
-		if windowSize < int(opts.PartSize) {
-			windowSize = int(opts.PartSize)
-		}
-		uploadingParts := NewHeap(make([]int, 0, opts.NumThreads))
-
-		curPart := FindMinMissingInteger(partNumbers)
-		// minPart is the minimum part number present in the window.
-		minPart := curPart
-
-		for {
-			// Upload parts in window.
-			for curPart <= totalPartsCount && curPart < minPart+windowSize/int(partSize) {
-				if !slices.Contains(partNumbers, curPart) {
-					um.debugF("sending part to be uploaded: %d", curPart)
-					uploadingParts.Push(curPart)
-					uploadPartsCh <- curPart
-				}
-				curPart++
-			}
-
-			// Wait for a part to complete.
-			select {
-			case <-ctx.Done():
-				return
-			case partNumber := <-completedPartsCh:
-				uploadingParts.Remove(partNumber)
-				if uploadingParts.Len() == 0 {
-					// Handle the case when partNumber is the last part.
-					// In this case, it means that all other parts in the window are uploaded.
-					// We thus need to update the minPart to the immediate next part outside the window.
-					minPart = partNumber + windowSize/int(partSize)
-				} else {
-					minPart = uploadingParts.Peek()
-				}
-				um.debugF("completed part received: %d", partNumber)
-			}
-		}
-	}()
-
-	// Get reader of the file to be uploaded.
-	fileReader, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer fileReader.Close()
-
-	// Starts parallel uploads.
-	// Receive the part number to upload from the uploadPartsCh channel.
-	for w := 1; w <= int(opts.NumThreads); w++ {
-		go func() {
-			for {
-				var partToUpload int
-				var ok bool
-				select {
-				case <-ctx.Done():
-					return
-				case partToUpload, ok = <-uploadPartsCh:
-					if !ok {
-						return
-					}
-				}
-
-				// Calculate the offset and size for the part to be uploaded.
-				readOffset := int64(partToUpload-1) * partSize
-				curPartSize := partSize
-				if partToUpload == totalPartsCount {
-					curPartSize = lastPartSize
-				}
-
-				sectionReader := &uploadProgressSectionReader{
-					SectionReader: io.NewSectionReader(fileReader, readOffset, curPartSize),
-					fileInfo:      um.fileInfos[filePath],
-					absPath:       filePath,
-				}
-				um.debugF("Uploading part: %d", partToUpload)
-				objPart, err := c.PutObjectPart(ctx, bucket, key, uploadId, partToUpload, sectionReader, curPartSize, minio.PutObjectPartOptions{SSE: opts.ServerSideEncryption})
-				if err != nil {
-					um.debugF("Upload part: %d failed: %v", partToUpload, err)
-					uploadedPartsCh <- uploadedPartRes{
-						Error: err,
-					}
-				} else {
-					um.debugF("Upload part: %d success", partToUpload)
-					uploadedPartsCh <- uploadedPartRes{
-						Part: objPart,
-					}
-				}
-			}
-		}()
-	}
-
-	// Gather the responses as they occur and update any progress bar
-	numToUpload := totalPartsCount - len(partNumbers)
-	for m := 1; m <= numToUpload; m++ {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case uploadRes := <-uploadedPartsCh:
-			if uploadRes.Error != nil {
-				return uploadRes.Error
-			}
-
-			// Update the uploadedSize.
-			uploadedSize += uploadRes.Part.Size
-			parts = append(parts, minio.CompletePart{
-				ETag:           uploadRes.Part.ETag,
-				PartNumber:     uploadRes.Part.PartNumber,
-				ChecksumCRC32:  uploadRes.Part.ChecksumCRC32,
-				ChecksumCRC32C: uploadRes.Part.ChecksumCRC32C,
-				ChecksumSHA1:   uploadRes.Part.ChecksumSHA1,
-				ChecksumSHA256: uploadRes.Part.ChecksumSHA256,
-			})
-
-			partsJsonBytes, err := json.Marshal(parts)
-			if err != nil {
-				return errors.Wrapf(err, "Marshal parts failed")
-			}
-			batch := map[string][]byte{
-				uploadIdKey:     []byte(uploadId),
-				partsKey:        partsJsonBytes,
-				uploadedSizeKey: []byte(strconv.FormatInt(uploadedSize, 10)),
-			}
-			if err = db.BatchPut(batch); err != nil {
-				return errors.Wrapf(err, "Batch write parts failed")
-			}
-			completedPartsCh <- uploadRes.Part.PartNumber
-		}
-	}
-
-	um.fileInfos[filePath].Status = MultipartCompletionInProgress
-
-	// Verify if we uploaded all the data.
-	if uploadedSize != fileSize {
-		return errors.Wrapf(err, "Uploaded size: %d, file size: %d, does not match", uploadedSize, fileSize)
-	}
-
-	// Sort all completed parts.
-	slices.SortFunc(parts, func(i, j minio.CompletePart) int {
-		return i.PartNumber - j.PartNumber
-	})
-
-	_, err = c.CompleteMultipartUpload(ctx, bucket, key, uploadId, parts, opts)
-	if err != nil {
-		return errors.Wrapf(err, "Complete multipart upload failed")
-	}
-
-	if err = db.Delete(); err != nil {
-		return errors.Wrap(err, "Delete db failed")
-	}
-
-	return nil
-}
-
-func (um *UploadManager) generateUploadUrlBatches(filesGenerator <-chan string, recordName *name.Record, relativeDir string) <-chan map[string]string {
-	ret := make(chan map[string]string)
-	go func() {
-		defer close(ret)
-		var files []*openv1alpha1resource.File
-		for f := range filesGenerator {
-			um.addFile(f)
-			checksum, size, err := fs.CalSha256AndSize(f)
-			if err != nil {
-				um.addErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
-				continue
-			}
-			um.fileInfos[f].Size = size
-			um.fileInfos[f].Sha256 = checksum
-
-			relativePath, err := filepath.Rel(relativeDir, f)
-			if err != nil {
-				um.addErr(f, errors.Wrapf(err, "unable to get relative path"))
-				continue
-			}
-
-			// Check if the file already exists in the record.
-			getFileRes, err := um.apiOpts.GetFile(context.TODO(), name.File{
+		files = append(files, &openv1alpha1resource.File{
+			Name: name.File{
 				ProjectID: recordName.ProjectID,
 				RecordID:  recordName.RecordID,
 				Filename:  relativePath,
-			}.String())
-			if err == nil && getFileRes.Sha256 == checksum && getFileRes.Size == size {
-				um.fileInfos[f].Status = PreviouslyUploaded
-				continue
-			}
+			}.String(),
+			Filename: relativePath,
+			Sha256:   checksum,
+			Size:     size,
+		})
 
-			files = append(files, &openv1alpha1resource.File{
-				Name: name.File{
-					ProjectID: recordName.ProjectID,
-					RecordID:  recordName.RecordID,
-					Filename:  relativePath,
-				}.String(),
-				Filename: relativePath,
-				Sha256:   checksum,
-				Size:     size,
-			})
-
-			if len(files) == processBatchSize {
-				res, err := um.apiOpts.GenerateFileUploadUrls(context.TODO(), recordName, files)
-				if err != nil {
-					for _, file := range files {
-						um.addErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
-					}
-					continue
-				}
-				ret <- res
-				files = nil
-			}
-		}
-
-		if len(files) > 0 {
+		if len(files) == processBatchSize {
+			um.debugF("Generating upload urls for %d files", len(files))
 			res, err := um.apiOpts.GenerateFileUploadUrls(context.TODO(), recordName, files)
 			if err != nil {
 				for _, file := range files {
 					um.addErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
 				}
-				return
+				continue
 			}
-			ret <- res
+			for k, v := range res {
+				fileResource, _ := name.NewFile(k)
+				ret[filepath.Join(relativeDir, fileResource.Filename)] = v
+			}
+			files = nil
 		}
-	}()
+	}
+
+	if len(files) > 0 {
+		um.debugF("Generating upload urls for %d files", len(files))
+		res, err := um.apiOpts.GenerateFileUploadUrls(context.TODO(), recordName, files)
+		if err != nil {
+			for _, file := range files {
+				um.addErr(filepath.Join(relativeDir, file.Filename), errors.Wrapf(err, "unable to generate upload urls"))
+			}
+		}
+		for k, v := range res {
+			fileResource, _ := name.NewFile(k)
+			ret[filepath.Join(relativeDir, fileResource.Filename)] = v
+		}
+	}
 
 	return ret
 }
@@ -715,25 +801,18 @@ func (um *UploadManager) View() string {
 	return s
 }
 
-// TickMsg is a message that is sent to the update function every 2 second.
+// TickMsg is a message that is sent to the update function every 0.5 second.
 type TickMsg time.Time
 
-// tick is a command that sends a TickMsg every 2 seconds.
+// tick is a command that sends a TickMsg every 0.5 second.
 func tick() tea.Cmd {
-	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
 		return TickMsg(t)
 	})
 }
 
-// uploadedPartRes - the response received from a part upload.
-type uploadedPartRes struct {
-	Error error // Any error encountered while uploading the part.
-	Part  minio.ObjectPart
-}
-
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
-	absPath  string
 	fileInfo *FileInfo
 }
 
@@ -746,7 +825,6 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 // uploadProgressSectionReader is a SectionReader that also sends progress updates to a channel.
 type uploadProgressSectionReader struct {
 	*io.SectionReader
-	absPath  string
 	fileInfo *FileInfo
 }
 
