@@ -18,26 +18,26 @@ var (
 	defaultPartSize = uint64(1024 * 1024 * 128)
 )
 
-type MultipartOpts struct {
-	Threads    int
-	Size       string
-	sizeUint64 uint64
+type UploadManagerOpts struct {
+	Threads        int
+	PartSize       string
+	partSizeUint64 uint64
 }
 
-func (opt *MultipartOpts) Valid() error {
+func (opt *UploadManagerOpts) Valid() error {
 	if sizeUint64, err := opt.partSize(); err != nil {
 		return errors.Wrap(err, "parse part size")
 	} else {
-		opt.sizeUint64 = sizeUint64
+		opt.partSizeUint64 = sizeUint64
 		return nil
 	}
 }
 
-func (opt *MultipartOpts) partSize() (uint64, error) {
-	if len(opt.Size) == 0 {
+func (opt *UploadManagerOpts) partSize() (uint64, error) {
+	if len(opt.PartSize) == 0 {
 		return defaultPartSize, nil
 	}
-	return humanize.ParseBytes(opt.Size)
+	return humanize.ParseBytes(opt.PartSize)
 }
 
 type FileOpts struct {

@@ -34,7 +34,7 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 		projectSlug       = ""
 		labelDisplayNames []string
 		thumbnail         = ""
-		multiOpts         = &upload_utils.MultipartOpts{}
+		multiOpts         = &upload_utils.UploadManagerOpts{}
 		timeout           time.Duration
 	)
 
@@ -104,8 +104,8 @@ func NewCreateCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().StringSliceVarP(&labelDisplayNames, "labels", "l", []string{}, "labels of the record.")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
 	cmd.Flags().StringVarP(&thumbnail, "thumbnail", "i", "", "thumbnail path of the record.")
-	cmd.Flags().IntVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
-	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().IntVarP(&multiOpts.Threads, "parallel", "P", 4, "number of uploads (could be part) in parallel")
+	cmd.Flags().StringVarP(&multiOpts.PartSize, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd

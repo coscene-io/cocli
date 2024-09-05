@@ -53,6 +53,10 @@ const (
 	processBatchSize       = 20
 )
 
+var (
+	spinnerFrames = []string{"⣾", "⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽"}
+)
+
 // UploadStatusEnum is used to keep track of the state of a file upload
 type UploadStatusEnum int
 
@@ -60,8 +64,14 @@ const (
 	// Unprocessed is used to indicate that the file has not been processed yet
 	Unprocessed UploadStatusEnum = iota
 
+	// CalculatingSha256 is used to indicate that the file sha256 is being calculated
+	CalculatingSha256
+
 	// PreviouslyUploaded is used to indicate that the file has been uploaded before
 	PreviouslyUploaded
+
+	// WaitingForUpload is used to indicate that the file is waiting to be uploaded
+	WaitingForUpload
 
 	// UploadInProgress is used to indicate that the file upload is in progress
 	UploadInProgress
@@ -116,7 +126,7 @@ type MultipartCheckpointInfo struct {
 // UploadManager is a manager for uploading files through minio client.
 type UploadManager struct {
 	// client and opts
-	opts    *MultipartOpts
+	opts    *UploadManagerOpts
 	apiOpts *ApiOpts
 	client  *minio.Client
 
@@ -127,6 +137,7 @@ type UploadManager struct {
 
 	// Monitor related
 	windowWidth int
+	spinnerIdx  int
 	manualQuit  bool
 	monitor     *tea.Program
 
@@ -135,8 +146,8 @@ type UploadManager struct {
 	isDebug bool
 }
 
-func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, apiOpts *ApiOpts, multiOpts *MultipartOpts) (*UploadManager, error) {
-	if err := multiOpts.Valid(); err != nil {
+func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, apiOpts *ApiOpts, opts *UploadManagerOpts) (*UploadManager, error) {
+	if err := opts.Valid(); err != nil {
 		return nil, errors.Wrap(err, "invalid multipart options")
 	}
 	generateSecurityTokenRes, err := apiOpts.GenerateSecurityToken(context.Background(), proj.String())
@@ -154,7 +165,7 @@ func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, apiOp
 	}
 
 	um := &UploadManager{
-		opts:      multiOpts,
+		opts:      opts,
 		apiOpts:   apiOpts,
 		client:    mc,
 		isDebug:   log.GetLevel() == log.DebugLevel,
@@ -217,12 +228,8 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 	// Start the upload workers
 	for i := 0; i < um.opts.Threads; i++ {
 		go func() {
-			for {
-				uploadInfo, ok := <-uploadCh
+			for uploadInfo := range uploadCh {
 				um.debugF("Worker %d received upload task with path: %s, part id: %d", i, uploadInfo.Path, uploadInfo.PartId)
-				if !ok {
-					return
-				}
 				if uploadInfo.UploadId == "" {
 					uploadInfo.Err = um.consumeSingleUploadInfo(ctx, uploadInfo)
 				} else {
@@ -263,7 +270,7 @@ func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrl
 
 			fileInfo := um.fileInfos[fileAbsolutePath]
 
-			if fileInfo.Size <= int64(um.opts.sizeUint64) {
+			if fileInfo.Size <= int64(um.opts.partSizeUint64) {
 				ret <- UploadInfo{
 					Path:   fileAbsolutePath,
 					Bucket: bucket,
@@ -300,7 +307,7 @@ func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAb
 	}
 
 	// Create uploader db
-	db, err := NewUploadDB(fileAbsolutePath, tags[userTagRecordIdKey], fileInfo.Sha256)
+	db, err := NewUploadDB(fileAbsolutePath, tags[userTagRecordIdKey], fileInfo.Sha256, um.opts.partSizeUint64)
 	if err != nil {
 		return nil, errors.Wrap(err, "Create uploader db failed")
 	}
@@ -336,7 +343,7 @@ func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAb
 		checkpoint = MultipartCheckpointInfo{}
 		checkpoint.UploadId, err = c.NewMultipartUpload(ctx, bucket, key, minio.PutObjectOptions{
 			UserTags: tags,
-			PartSize: um.opts.sizeUint64,
+			PartSize: um.opts.partSizeUint64,
 		})
 		if err != nil {
 			return nil, errors.Wrap(err, "New multipart upload failed")
@@ -353,7 +360,7 @@ func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAb
 
 	// ----------------- End fetching previous upload info from db -----------------
 	// Calculate the optimal parts info for a given size.
-	totalPartsCount, partSize, lastPartSize, err := minio.OptimalPartInfo(fileInfo.Size, um.opts.sizeUint64)
+	totalPartsCount, partSize, lastPartSize, err := minio.OptimalPartInfo(fileInfo.Size, um.opts.partSizeUint64)
 	if err != nil {
 		return nil, errors.Wrap(err, "Optimal part info failed")
 	}
@@ -400,19 +407,29 @@ func (um *UploadManager) scheduleUploads(ctx context.Context, uploadInfos <-chan
 	var previousUploadInfo *UploadInfo
 
 	for {
-		for i := len(uploadInfoInProgress) + 1; i <= numThread; i++ {
+		for numThread-len(uploadInfoInProgress) > 0 {
 			// If there is a previous upload info, try to upload it first.
 			if previousUploadInfo != nil {
+				if um.fileInfos[previousUploadInfo.Path].Status == UploadFailed {
+					// Skip if some other part of the same file has failed.
+					previousUploadInfo = nil
+					continue
+				}
+
 				if um.canUpload(*previousUploadInfo, uploadInfoInProgress) {
 					uploadCh <- *previousUploadInfo
 					uploadInfoInProgress = append(uploadInfoInProgress, *previousUploadInfo)
 					previousUploadInfo = nil
 					continue
-				} else {
-					break
 				}
+
+				break
 			}
 			if uploadInfo, ok := <-uploadInfos; ok {
+				if um.fileInfos[uploadInfo.Path].Status == UploadFailed {
+					// Skip if some other part of the same file has failed
+					continue
+				}
 				if um.canUpload(uploadInfo, uploadInfoInProgress) {
 					uploadCh <- uploadInfo
 					uploadInfoInProgress = append(uploadInfoInProgress, uploadInfo)
@@ -550,10 +567,10 @@ func (um *UploadManager) canUpload(uploadCandidate UploadInfo, uploadInfoInProgr
 	}
 
 	windowSize := defaultWindowSize
-	if windowSize < int(um.opts.sizeUint64) {
-		windowSize = int(um.opts.sizeUint64)
+	if windowSize < int(um.opts.partSizeUint64) {
+		windowSize = int(um.opts.partSizeUint64)
 	}
-	threshold := leastUploadingPartId + windowSize/int(um.opts.sizeUint64)
+	threshold := leastUploadingPartId + windowSize/int(um.opts.partSizeUint64)
 
 	return uploadCandidate.PartId <= threshold
 }
@@ -658,6 +675,7 @@ func (um *UploadManager) findAllUploadUrls(filesToUpload []string, recordName *n
 
 	for _, f := range filesToUpload {
 		um.addFile(f)
+		um.fileInfos[f].Status = CalculatingSha256
 		checksum, size, err := fs.CalSha256AndSize(f)
 		if err != nil {
 			um.addErr(f, errors.Wrapf(err, "unable to calculate sha256 for file"))
@@ -683,6 +701,8 @@ func (um *UploadManager) findAllUploadUrls(filesToUpload []string, recordName *n
 			um.uploadWg.Done()
 			continue
 		}
+
+		um.fileInfos[f].Status = WaitingForUpload
 
 		files = append(files, &openv1alpha1resource.File{
 			Name: name.File{
@@ -755,6 +775,7 @@ func (um *UploadManager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return um, tea.Quit
 		}
 	case TickMsg:
+		um.spinnerIdx = (um.spinnerIdx + 1) % len(spinnerFrames)
 		return um, tick()
 	}
 	return um, nil
@@ -764,20 +785,25 @@ func (um *UploadManager) View() string {
 	s := "Upload Status:\n"
 	skipCount := 0
 	successCount := 0
+	spinnerFrame := spinnerFrames[um.spinnerIdx]
 	for _, k := range um.fileList {
 		// Check if the file has been uploaded before
 		statusStrLen := um.windowWidth - len(k) - 1
 		switch um.fileInfos[k].Status {
 		case Unprocessed:
-			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Preparing for upload")
+			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Preparing for upload"+spinnerFrame)
+		case CalculatingSha256:
+			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Calculating sha256"+spinnerFrame)
 		case PreviouslyUploaded:
 			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Previously uploaded, skipping")
 			skipCount++
+		case WaitingForUpload:
+			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Waiting for upload")
 		case UploadCompleted:
 			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Upload completed")
 			successCount++
 		case MultipartCompletionInProgress:
-			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Completing multipart upload")
+			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Completing multipart upload"+spinnerFrame)
 		case UploadFailed:
 			s += fmt.Sprintf("%s:%*s\n", k, statusStrLen, "Upload failed")
 		case UploadInProgress:

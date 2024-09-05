@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/minio/sha256-simd"
@@ -20,11 +21,12 @@ type UploadDB struct {
 	*bolt.DB
 }
 
-func NewUploadDB(filename string, recordId string, hash string) (*UploadDB, error) {
+func NewUploadDB(filename string, recordId string, hash string, partSize uint64) (*UploadDB, error) {
 	// Compute the db file name by hashing the filepath and recordId
 	// todo: add part size
 	h := sha256.New()
-	h.Write([]byte(recordId + hash + filename))
+	partSizeHash := fmt.Sprintf("%0*s", 20, strconv.FormatUint(partSize, 10))
+	h.Write([]byte(recordId + hash + partSizeHash + filename))
 
 	boltDB, err := bolt.Open(filepath.Join(constants.DefaultUploaderDirPath, fmt.Sprintf("%x.db", h.Sum(nil))), 0600, nil)
 	if err != nil {

@@ -28,11 +28,11 @@ import (
 
 func NewUploadCommand(cfgPath *string) *cobra.Command {
 	var (
-		isRecursive   = false
-		includeHidden = false
-		projectSlug   = ""
-		multiOpts     = &upload_utils.MultipartOpts{}
-		timeout       time.Duration
+		isRecursive       = false
+		includeHidden     = false
+		projectSlug       = ""
+		uploadManagerOpts = &upload_utils.UploadManagerOpts{}
+		timeout           time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -63,7 +63,7 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 
 			// create minio client and upload manager first.
 			um, err := upload_utils.NewUploadManagerFromConfig(proj, timeout,
-				&upload_utils.ApiOpts{SecurityTokenInterface: pm.SecurityTokenCli(), FileInterface: pm.FileCli()}, multiOpts)
+				&upload_utils.ApiOpts{SecurityTokenInterface: pm.SecurityTokenCli(), FileInterface: pm.FileCli()}, uploadManagerOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -85,8 +85,8 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().BoolVarP(&isRecursive, "recursive", "R", false, "upload files in the current directory recursively")
 	cmd.Flags().BoolVarP(&includeHidden, "include-hidden", "H", false, "include hidden files (\"dot\" files) in the upload")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
-	cmd.Flags().IntVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
-	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().IntVarP(&uploadManagerOpts.Threads, "parallel", "P", 4, "number of uploads (could be part) in parallel")
+	cmd.Flags().StringVarP(&uploadManagerOpts.PartSize, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
 
 	return cmd
