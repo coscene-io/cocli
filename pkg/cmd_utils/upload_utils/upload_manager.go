@@ -26,7 +26,6 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
@@ -123,6 +122,12 @@ type MultipartCheckpointInfo struct {
 	Parts        []minio.CompletePart `json:"parts"`
 }
 
+// IncUploadedMsg is used to send incremental uploaded size to the progress update goroutine
+type IncUploadedMsg struct {
+	Path        string
+	UploadedInc int64
+}
+
 // UploadManager is a manager for uploading files through minio client.
 type UploadManager struct {
 	// client and opts
@@ -131,9 +136,10 @@ type UploadManager struct {
 	client  *minio.Client
 
 	// file status related
-	fileInfos map[string]*FileInfo
-	fileList  []string
-	uploadWg  sync.WaitGroup
+	fileInfos  map[string]*FileInfo
+	fileList   []string
+	uploadWg   sync.WaitGroup
+	progressCh chan IncUploadedMsg
 
 	// Monitor related
 	windowWidth int
@@ -165,13 +171,14 @@ func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, apiOp
 	}
 
 	um := &UploadManager{
-		opts:      opts,
-		apiOpts:   apiOpts,
-		client:    mc,
-		isDebug:   log.GetLevel() == log.DebugLevel,
-		fileInfos: make(map[string]*FileInfo),
-		fileList:  []string{},
-		errs:      make(map[string]error),
+		opts:       opts,
+		apiOpts:    apiOpts,
+		client:     mc,
+		isDebug:    log.GetLevel() == log.DebugLevel,
+		fileInfos:  make(map[string]*FileInfo),
+		fileList:   []string{},
+		progressCh: make(chan IncUploadedMsg, 5000), // buffer the channel to avoid blocking
+		errs:       make(map[string]error),
 	}
 
 	return um, nil
@@ -200,9 +207,20 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 		}
 	}()
 
+	// Start the progress monitor
+	go func() {
+		for {
+			msg := <-um.progressCh
+			um.fileInfos[msg.Path].Uploaded += msg.UploadedInc
+		}
+	}()
+
 	// Send an empty message to wait for the monitor to start
 	um.monitor.Send(struct{}{})
-	um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
+	if log.GetLevel() == log.TraceLevel {
+		// Only enable trace logging if the log level is set to trace
+		um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
+	}
 
 	filesToUpload := fs.FindFiles(fileOpts.Path, fileOpts.Recursive, fileOpts.IncludeHidden)
 	um.uploadWg.Add(len(filesToUpload) + len(fileOpts.AdditionalUploads))
@@ -593,8 +611,9 @@ func (um *UploadManager) consumeSingleUploadInfo(ctx context.Context, uploadInfo
 
 	um.fileInfos[uploadInfo.Path].Status = UploadInProgress
 	progressReader := &uploadProgressReader{
-		File:     uploadInfo.FileReader,
-		fileInfo: um.fileInfos[uploadInfo.Path],
+		File:       uploadInfo.FileReader,
+		fileInfo:   um.fileInfos[uploadInfo.Path],
+		progressCh: um.progressCh,
 	}
 
 	_, err := minio.Core{Client: um.client}.PutObject(
@@ -611,6 +630,7 @@ func (um *UploadManager) consumeMultipartUploadInfo(ctx context.Context, uploadI
 	sectionReader := &uploadProgressSectionReader{
 		SectionReader: io.NewSectionReader(uploadInfo.FileReader, uploadInfo.ReadOffset, uploadInfo.ReadSize),
 		fileInfo:      um.fileInfos[uploadInfo.Path],
+		progressCh:    um.progressCh,
 	}
 	um.debugF("Uploading part %d of %s", uploadInfo.PartId, uploadInfo.Path)
 
@@ -857,7 +877,8 @@ func tick() tea.Cmd {
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
 	*os.File
-	fileInfo *FileInfo
+	fileInfo   *FileInfo
+	progressCh chan IncUploadedMsg
 }
 
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
@@ -865,7 +886,10 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	if err != nil && err != io.EOF {
 		r.fileInfo.Uploaded = 0
 	} else {
-		r.fileInfo.Uploaded += int64(n)
+		r.progressCh <- IncUploadedMsg{
+			Path:        r.fileInfo.Path,
+			UploadedInc: int64(n),
+		}
 	}
 	return n, err
 }
@@ -873,17 +897,24 @@ func (r *uploadProgressReader) Read(b []byte) (int, error) {
 // uploadProgressSectionReader is a SectionReader that also sends progress updates to a channel.
 type uploadProgressSectionReader struct {
 	*io.SectionReader
-	fileInfo *FileInfo
-	uploaded int64
+	fileInfo   *FileInfo
+	uploaded   int64
+	progressCh chan IncUploadedMsg
 }
 
 func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
 	if err != nil && err != io.EOF {
-		atomic.AddInt64(&r.fileInfo.Uploaded, -r.uploaded)
+		r.progressCh <- IncUploadedMsg{
+			Path:        r.fileInfo.Path,
+			UploadedInc: -r.uploaded,
+		}
 		r.uploaded = 0
 	} else {
-		atomic.AddInt64(&r.fileInfo.Uploaded, int64(n))
+		r.progressCh <- IncUploadedMsg{
+			Path:        r.fileInfo.Path,
+			UploadedInc: int64(n),
+		}
 		r.uploaded += int64(n)
 	}
 	return n, err
