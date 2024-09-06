@@ -97,10 +97,11 @@ type FileInfo struct {
 
 // UploadInfo contains the information needed to upload a file or a file part (multipart upload).
 type UploadInfo struct {
-	Path   string
-	Bucket string
-	Key    string
-	Tags   map[string]string
+	Path       string
+	Bucket     string
+	Key        string
+	Tags       map[string]string
+	FileReader *os.File
 
 	// Upload result infos
 	Result minio.ObjectPart
@@ -112,7 +113,6 @@ type UploadInfo struct {
 	TotalPartsCount int
 	ReadOffset      int64
 	ReadSize        int64
-	FileReader      *os.File
 	DB              *UploadDB
 }
 
@@ -241,7 +241,7 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 		}()
 	}
 
-	uploadInfos := um.produceUploadInfos(ctx, fileToUploadUrls, fileOpts.relDir)
+	uploadInfos := um.produceUploadInfos(ctx, fileToUploadUrls)
 	go um.scheduleUploads(ctx, uploadInfos, uploadCh, uploadResultCh, um.opts.Threads)
 	um.uploadWg.Wait()
 
@@ -252,7 +252,7 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 }
 
 // produceUploadInfos is a producer of upload infos for each file to be uploaded.
-func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrls map[string]string, relDir string) <-chan UploadInfo {
+func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrls map[string]string) <-chan UploadInfo {
 	ret := make(chan UploadInfo)
 	go func() {
 		defer close(ret)
@@ -271,11 +271,18 @@ func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrl
 			fileInfo := um.fileInfos[fileAbsolutePath]
 
 			if fileInfo.Size <= int64(um.opts.partSizeUint64) {
+				fileReader, err := os.Open(fileAbsolutePath)
+				if err != nil {
+					um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to open file"))
+					continue
+				}
+
 				ret <- UploadInfo{
-					Path:   fileAbsolutePath,
-					Bucket: bucket,
-					Key:    key,
-					Tags:   tags,
+					Path:       fileAbsolutePath,
+					Bucket:     bucket,
+					Key:        key,
+					Tags:       tags,
+					FileReader: fileReader,
 				}
 			} else {
 				multipartUploadInfo, err := um.produceMultipartUploadInfos(ctx, fileAbsolutePath, bucket, key, tags)
@@ -407,12 +414,13 @@ func (um *UploadManager) scheduleUploads(ctx context.Context, uploadInfos <-chan
 	var previousUploadInfo *UploadInfo
 
 	for {
-		for numThread-len(uploadInfoInProgress) > 0 {
+		for i := len(uploadInfoInProgress) + 1; i <= numThread; i++ {
 			// If there is a previous upload info, try to upload it first.
 			if previousUploadInfo != nil {
 				if um.fileInfos[previousUploadInfo.Path].Status == UploadFailed {
 					// Skip if some other part of the same file has failed.
 					previousUploadInfo = nil
+					i--
 					continue
 				}
 
@@ -428,6 +436,7 @@ func (um *UploadManager) scheduleUploads(ctx context.Context, uploadInfos <-chan
 			if uploadInfo, ok := <-uploadInfos; ok {
 				if um.fileInfos[uploadInfo.Path].Status == UploadFailed {
 					// Skip if some other part of the same file has failed
+					i--
 					continue
 				}
 				if um.canUpload(uploadInfo, uploadInfoInProgress) {
@@ -576,18 +585,26 @@ func (um *UploadManager) canUpload(uploadCandidate UploadInfo, uploadInfoInProgr
 }
 
 func (um *UploadManager) consumeSingleUploadInfo(ctx context.Context, uploadInfo UploadInfo) error {
+	defer func(FileReader *os.File) {
+		if err := FileReader.Close(); err != nil {
+			um.debugF("Close file failed: %v", err)
+		}
+	}(uploadInfo.FileReader)
+
 	um.fileInfos[uploadInfo.Path].Status = UploadInProgress
-	progress := &uploadProgressReader{
+	progressReader := &uploadProgressReader{
+		File:     uploadInfo.FileReader,
 		fileInfo: um.fileInfos[uploadInfo.Path],
 	}
-	if _, err := um.client.FPutObject(ctx, uploadInfo.Bucket, uploadInfo.Key, uploadInfo.Path, minio.PutObjectOptions{
-		Progress:         progress,
-		UserTags:         uploadInfo.Tags,
-		DisableMultipart: true,
-	}); err != nil {
-		return errors.Wrapf(err, "Put object failed")
-	}
-	return nil
+
+	_, err := minio.Core{Client: um.client}.PutObject(
+		ctx, uploadInfo.Bucket, uploadInfo.Key, progressReader, um.fileInfos[uploadInfo.Path].Size, "",
+		um.fileInfos[uploadInfo.Path].Sha256, minio.PutObjectOptions{
+			UserTags:         uploadInfo.Tags,
+			DisableMultipart: true,
+		})
+
+	return err
 }
 
 func (um *UploadManager) consumeMultipartUploadInfo(ctx context.Context, uploadInfo UploadInfo) (minio.ObjectPart, error) {
@@ -839,23 +856,35 @@ func tick() tea.Cmd {
 
 // uploadProgressReader is a reader that sends progress updates to a channel.
 type uploadProgressReader struct {
+	*os.File
 	fileInfo *FileInfo
 }
 
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
-	n := int64(len(b))
-	r.fileInfo.Uploaded += n
-	return int(n), nil
+	n, err := r.File.Read(b)
+	if err != nil && err != io.EOF {
+		r.fileInfo.Uploaded = 0
+	} else {
+		r.fileInfo.Uploaded += int64(n)
+	}
+	return n, err
 }
 
 // uploadProgressSectionReader is a SectionReader that also sends progress updates to a channel.
 type uploadProgressSectionReader struct {
 	*io.SectionReader
 	fileInfo *FileInfo
+	uploaded int64
 }
 
 func (r *uploadProgressSectionReader) Read(b []byte) (int, error) {
 	n, err := r.SectionReader.Read(b)
-	atomic.AddInt64(&r.fileInfo.Uploaded, int64(n))
+	if err != nil && err != io.EOF {
+		atomic.AddInt64(&r.fileInfo.Uploaded, -r.uploaded)
+		r.uploaded = 0
+	} else {
+		atomic.AddInt64(&r.fileInfo.Uploaded, int64(n))
+		r.uploaded += int64(n)
+	}
 	return n, err
 }
