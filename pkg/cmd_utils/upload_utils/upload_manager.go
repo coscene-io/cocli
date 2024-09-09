@@ -33,7 +33,7 @@ import (
 	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/coscene-io/cocli/internal/fs"
 	"github.com/coscene-io/cocli/internal/name"
-	"github.com/coscene-io/cocli/internal/sentry_utils"
+	"github.com/coscene-io/cocli/internal/utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils"
 	"github.com/getsentry/sentry-go"
 	"github.com/minio/minio-go/v7"
@@ -194,7 +194,7 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 	}
 
 	// Start the status monitor
-	um.GoWithSentry("upload status monitor", func(_ *sentry.Hub) {
+	um.goWithSentry("upload status monitor", func(_ *sentry.Hub) {
 		_, err := um.monitor.Run()
 		if err != nil {
 			log.Fatalf("Error running upload status monitor: %v", err)
@@ -245,7 +245,7 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 
 	// Start the upload workers
 	for i := 0; i < um.opts.Threads; i++ {
-		um.GoWithSentry(fmt.Sprintf("upload worker %d", i), func(_ *sentry.Hub) {
+		um.goWithSentry(fmt.Sprintf("upload worker %d", i), func(_ *sentry.Hub) {
 			defer func() {
 				um.debugF("Worker %d stopped", i)
 			}()
@@ -264,10 +264,10 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 	}
 
 	// Start the producer and scheduler
-	um.GoWithSentry("upload producer", func(_ *sentry.Hub) {
+	um.goWithSentry("upload producer", func(_ *sentry.Hub) {
 		um.produceUploadInfos(ctx, fileToUploadUrls, uploadInfos)
 	})
-	um.GoWithSentry("upload scheduler", func(_ *sentry.Hub) {
+	um.goWithSentry("upload scheduler", func(_ *sentry.Hub) {
 		um.scheduleUploads(ctx, uploadInfos, uploadCh, uploadResultCh, um.opts.Threads)
 	})
 
@@ -277,10 +277,10 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 	return nil
 }
 
-// GoWithSentry starts a goroutine with sentry error publishing.
+// goWithSentry starts a goroutine with sentry error publishing.
 // Also stops the monitor and waits for it to finish if an error occurs.
-func (um *UploadManager) GoWithSentry(routineName string, fn func(*sentry.Hub)) {
-	sentry_utils.SentryRunOptions{
+func (um *UploadManager) goWithSentry(routineName string, fn func(*sentry.Hub)) {
+	utils.SentryRunOptions{
 		RoutineName: routineName,
 		OnErrorFn:   um.stopMonitorAndWait,
 	}.Run(fn)

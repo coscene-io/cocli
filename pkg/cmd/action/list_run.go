@@ -16,15 +16,18 @@ package action
 
 import (
 	"context"
+	"fmt"
 	"os"
 
 	openv1alpha1resource "buf.build/gen/go/coscene-io/coscene-openapi/protocolbuffers/go/coscene/openapi/dataplatform/v1alpha1/resources"
+	"connectrpc.com/connect"
 	"github.com/coscene-io/cocli/api"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/name"
 	"github.com/coscene-io/cocli/internal/printer"
 	"github.com/coscene-io/cocli/internal/printer/printable"
 	"github.com/coscene-io/cocli/internal/printer/table"
+	"github.com/coscene-io/cocli/internal/utils"
 	mapset "github.com/deckarep/golang-set/v2"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -57,7 +60,10 @@ func NewListRunCommand(cfgPath *string) *cobra.Command {
 			}
 			if recordNameOrId != "" {
 				recordName, err := pm.RecordCli().RecordId2Name(context.TODO(), recordNameOrId, proj)
-				if err != nil {
+				if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+					fmt.Printf("failed to find record: %s in project: %s\n", recordNameOrId, proj)
+					return
+				} else if err != nil {
 					log.Fatalf("unable to get record name from %s: %v", recordNameOrId, err)
 				}
 				listRunOpts.RecordNames = []*name.Record{recordName}

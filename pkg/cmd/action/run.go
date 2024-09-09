@@ -18,8 +18,10 @@ import (
 	"context"
 	"fmt"
 
+	"connectrpc.com/connect"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/prompts"
+	"github.com/coscene-io/cocli/internal/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -51,7 +53,10 @@ func NewRunCommand(cfgPath *string) *cobra.Command {
 				log.Fatalf("failed to convert action id to name: %v", err)
 			}
 			recordName, err := pm.RecordCli().RecordId2Name(context.TODO(), args[1], proj)
-			if err != nil {
+			if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+				fmt.Printf("failed to find record: %s in project: %s\n", args[1], proj)
+				return
+			} else if err != nil {
 				log.Fatalf("failed to convert record id to name: %v", err)
 			}
 
