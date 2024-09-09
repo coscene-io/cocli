@@ -35,6 +35,7 @@ func main() {
 		// of transactions for tracing.
 		// We recommend adjusting this value in production,
 		TracesSampleRate: 1.0,
+		AttachStacktrace: true,
 	})
 	if err != nil {
 		log.Fatalf("sentry.Init: %s", err)
@@ -44,7 +45,8 @@ func main() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			sentry.CaptureException(fmt.Errorf("%v", r))
+			sentry.CurrentHub().Recover(r)
+			panic(r)
 		}
 	}()
 

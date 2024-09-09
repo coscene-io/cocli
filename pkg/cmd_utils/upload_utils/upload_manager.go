@@ -33,7 +33,9 @@ import (
 	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/coscene-io/cocli/internal/fs"
 	"github.com/coscene-io/cocli/internal/name"
+	"github.com/coscene-io/cocli/internal/sentry_utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils"
+	"github.com/getsentry/sentry-go"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/muesli/reflow/wordwrap"
@@ -180,6 +182,7 @@ func NewUploadManagerFromConfig(proj *name.Project, timeout time.Duration, apiOp
 		progressCh: make(chan IncUploadedMsg, 5000), // buffer the channel to avoid blocking
 		errs:       make(map[string]error),
 	}
+	um.monitor = tea.NewProgram(um)
 
 	return um, nil
 }
@@ -190,22 +193,16 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 		return err
 	}
 
-	um.monitor = tea.NewProgram(um)
-	var monitorCompleteWg sync.WaitGroup
-	monitorCompleteWg.Add(1)
-	go func() {
-		defer monitorCompleteWg.Done()
-
+	// Start the status monitor
+	um.GoWithSentry("upload status monitor", func(_ *sentry.Hub) {
 		_, err := um.monitor.Run()
 		if err != nil {
 			log.Fatalf("Error running upload status monitor: %v", err)
 		}
-
-		um.printErrs()
 		if um.manualQuit {
 			log.Fatalf("Upload quit manually")
 		}
-	}()
+	})
 
 	// Start the progress monitor
 	go func() {
@@ -217,8 +214,9 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 
 	// Send an empty message to wait for the monitor to start
 	um.monitor.Send(struct{}{})
+
+	// Only enable trace logging if the log level is set to trace
 	if log.GetLevel() == log.TraceLevel {
-		// Only enable trace logging if the log level is set to trace
 		um.client.TraceOn(log.StandardLogger().WriterLevel(log.TraceLevel))
 	}
 
@@ -238,6 +236,8 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 		um.fileInfos[f].Sha256 = checksum
 	}
 
+	// Declare a channel that sends the upload infos for each file to be uploaded
+	uploadInfos := make(chan UploadInfo)
 	// Declare a channel that sends the next upload info to be processed
 	uploadCh := make(chan UploadInfo)
 	// Declare a channel that receives the result of the upload
@@ -245,7 +245,11 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 
 	// Start the upload workers
 	for i := 0; i < um.opts.Threads; i++ {
-		go func() {
+		um.GoWithSentry(fmt.Sprintf("upload worker %d", i), func(_ *sentry.Hub) {
+			defer func() {
+				um.debugF("Worker %d stopped", i)
+			}()
+
 			for uploadInfo := range uploadCh {
 				um.debugF("Worker %d received upload task with path: %s, part id: %d", i, uploadInfo.Path, uploadInfo.PartId)
 				if uploadInfo.UploadId == "" {
@@ -256,66 +260,88 @@ func (um *UploadManager) Run(ctx context.Context, rcd *name.Record, fileOpts *Fi
 
 				uploadResultCh <- uploadInfo
 			}
-		}()
+		})
 	}
 
-	uploadInfos := um.produceUploadInfos(ctx, fileToUploadUrls)
-	go um.scheduleUploads(ctx, uploadInfos, uploadCh, uploadResultCh, um.opts.Threads)
-	um.uploadWg.Wait()
+	// Start the producer and scheduler
+	um.GoWithSentry("upload producer", func(_ *sentry.Hub) {
+		um.produceUploadInfos(ctx, fileToUploadUrls, uploadInfos)
+	})
+	um.GoWithSentry("upload scheduler", func(_ *sentry.Hub) {
+		um.scheduleUploads(ctx, uploadInfos, uploadCh, uploadResultCh, um.opts.Threads)
+	})
 
-	um.monitor.Quit()
-	monitorCompleteWg.Wait()
+	um.uploadWg.Wait()
+	um.stopMonitorAndWait()
 
 	return nil
 }
 
+// GoWithSentry starts a goroutine with sentry error publishing.
+// Also stops the monitor and waits for it to finish if an error occurs.
+func (um *UploadManager) GoWithSentry(routineName string, fn func(*sentry.Hub)) {
+	sentry_utils.SentryRunOptions{
+		RoutineName: routineName,
+		OnErrorFn:   um.stopMonitorAndWait,
+	}.Run(fn)
+}
+
+// stopMonitorAndWait stops the monitor and waits for it to finish.
+func (um *UploadManager) stopMonitorAndWait() {
+	um.monitor.Quit()
+	um.monitor.Wait()
+
+	um.printErrs()
+	if um.manualQuit {
+		log.Fatalf("Upload quit manually")
+	}
+}
+
 // produceUploadInfos is a producer of upload infos for each file to be uploaded.
-func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrls map[string]string) <-chan UploadInfo {
-	ret := make(chan UploadInfo)
-	go func() {
-		defer close(ret)
-		for _, fileAbsolutePath := range um.fileList {
-			uploadUrl, ok := fileToUploadUrls[fileAbsolutePath]
-			if !ok {
-				continue
-			}
+func (um *UploadManager) produceUploadInfos(ctx context.Context, fileToUploadUrls map[string]string, uploadInfos chan UploadInfo) {
+	defer close(uploadInfos)
+	for _, fileAbsolutePath := range um.fileList {
+		uploadUrl, ok := fileToUploadUrls[fileAbsolutePath]
+		if !ok {
+			continue
+		}
 
-			bucket, key, tags, err := um.parseUrl(uploadUrl)
+		bucket, key, tags, err := um.parseUrl(uploadUrl)
+		if err != nil {
+			um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to parse upload url"))
+			continue
+		}
+
+		fileInfo := um.fileInfos[fileAbsolutePath]
+
+		if fileInfo.Size <= int64(um.opts.partSizeUint64) {
+			fileReader, err := os.Open(fileAbsolutePath)
 			if err != nil {
-				um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to parse upload url"))
+				um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to open file"))
 				continue
 			}
 
-			fileInfo := um.fileInfos[fileAbsolutePath]
-
-			if fileInfo.Size <= int64(um.opts.partSizeUint64) {
-				fileReader, err := os.Open(fileAbsolutePath)
-				if err != nil {
-					um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to open file"))
-					continue
-				}
-
-				ret <- UploadInfo{
-					Path:       fileAbsolutePath,
-					Bucket:     bucket,
-					Key:        key,
-					Tags:       tags,
-					FileReader: fileReader,
-				}
-			} else {
-				multipartUploadInfo, err := um.produceMultipartUploadInfos(ctx, fileAbsolutePath, bucket, key, tags)
-				if err != nil {
-					um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to produce multipart upload infos"))
-					continue
-				}
-				for _, info := range multipartUploadInfo {
-					ret <- info
+			uploadInfos <- UploadInfo{
+				Path:       fileAbsolutePath,
+				Bucket:     bucket,
+				Key:        key,
+				Tags:       tags,
+				FileReader: fileReader,
+			}
+		} else {
+			multipartUploadInfo, err := um.produceMultipartUploadInfos(ctx, fileAbsolutePath, bucket, key, tags)
+			if err != nil {
+				um.addErr(fileAbsolutePath, errors.Wrapf(err, "unable to produce multipart upload infos"))
+				continue
+			}
+			for idx, info := range multipartUploadInfo {
+				uploadInfos <- info
+				if idx == 0 {
+					um.fileInfos[fileAbsolutePath].Status = UploadInProgress
 				}
 			}
 		}
-	}()
-
-	return ret
+	}
 }
 
 func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAbsolutePath string, bucket string, key string, tags map[string]string) (uploadInfos []UploadInfo, err error) {
@@ -423,7 +449,6 @@ func (um *UploadManager) produceMultipartUploadInfos(ctx context.Context, fileAb
 	}
 
 	um.fileInfos[fileAbsolutePath].Uploaded = checkpoint.UploadedSize
-	um.fileInfos[fileAbsolutePath].Status = UploadInProgress
 	return uploadInfos, nil
 }
 
@@ -803,8 +828,6 @@ func (um *UploadManager) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		um.windowWidth = msg.Width
-	case tea.QuitMsg:
-		return um, tea.Quit
 	case tea.KeyMsg:
 		switch msg.Type {
 		case tea.KeyCtrlC, tea.KeyEscape, tea.KeyCtrlD:
@@ -884,7 +907,10 @@ type uploadProgressReader struct {
 func (r *uploadProgressReader) Read(b []byte) (int, error) {
 	n, err := r.File.Read(b)
 	if err != nil && err != io.EOF {
-		r.fileInfo.Uploaded = 0
+		r.progressCh <- IncUploadedMsg{
+			Path:        r.fileInfo.Path,
+			UploadedInc: -r.fileInfo.Uploaded,
+		}
 	} else {
 		r.progressCh <- IncUploadedMsg{
 			Path:        r.fileInfo.Path,
