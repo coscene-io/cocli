@@ -18,8 +18,10 @@ import (
 	"context"
 	"fmt"
 
+	"connectrpc.com/connect"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/name"
+	"github.com/coscene-io/cocli/internal/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -46,7 +48,10 @@ func NewCopyCommand(cfgPath *string) *cobra.Command {
 
 			// Handle args and flags.
 			recordName, err := pm.RecordCli().RecordId2Name(context.TODO(), args[0], proj)
-			if err != nil {
+			if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+				fmt.Printf("failed to find record: %s in project: %s\n", args[0], proj)
+				return
+			} else if err != nil {
 				log.Fatalf("unable to get record name from %s: %v", args[0], err)
 			}
 			var (
@@ -61,7 +66,10 @@ func NewCopyCommand(cfgPath *string) *cobra.Command {
 			}
 			if len(dstRecord) != 0 {
 				dstRecordName, err = pm.RecordCli().RecordId2Name(context.TODO(), dstRecord, proj)
-				if err != nil {
+				if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+					fmt.Printf("failed to find record: %s in project: %s\n", dstRecord, proj)
+					return
+				} else if err != nil {
 					log.Fatalf("unable to get record name from %s: %v", dstRecord, err)
 				}
 			}

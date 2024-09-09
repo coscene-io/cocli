@@ -20,7 +20,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/coscene-io/cocli/internal/config"
+	"github.com/coscene-io/cocli/internal/utils"
 	"github.com/coscene-io/cocli/pkg/cmd_utils/upload_utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -28,12 +30,11 @@ import (
 
 func NewUploadCommand(cfgPath *string) *cobra.Command {
 	var (
-		isRecursive   = false
-		includeHidden = false
-		projectSlug   = ""
-		multiOpts     = &upload_utils.MultipartOpts{}
-		timeout       time.Duration
-		hideMonitor   = false
+		isRecursive       = false
+		includeHidden     = false
+		projectSlug       = ""
+		uploadManagerOpts = &upload_utils.UploadManagerOpts{}
+		timeout           time.Duration
 	)
 
 	cmd := &cobra.Command{
@@ -51,7 +52,10 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 
 			// Handle args and flags.
 			recordName, err := pm.RecordCli().RecordId2Name(context.TODO(), args[0], proj)
-			if err != nil {
+			if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+				fmt.Printf("failed to find record: %s in project: %s\n", args[0], proj)
+				return
+			} else if err != nil {
 				log.Fatalf("unable to get record name from %s: %v", args[0], err)
 			}
 			filePath, err := filepath.Abs(args[1])
@@ -63,8 +67,8 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 			fmt.Printf("Uploading files to record: %s\n", recordName.RecordID)
 
 			// create minio client and upload manager first.
-			um, err := upload_utils.NewUploadManagerFromConfig(proj, timeout, hideMonitor,
-				&upload_utils.ApiOpts{SecurityTokenInterface: pm.SecurityTokenCli(), FileInterface: pm.FileCli()}, multiOpts)
+			um, err := upload_utils.NewUploadManagerFromConfig(proj, timeout,
+				&upload_utils.ApiOpts{SecurityTokenInterface: pm.SecurityTokenCli(), FileInterface: pm.FileCli()}, uploadManagerOpts)
 			if err != nil {
 				log.Fatalf("unable to create upload manager: %v", err)
 			}
@@ -86,10 +90,9 @@ func NewUploadCommand(cfgPath *string) *cobra.Command {
 	cmd.Flags().BoolVarP(&isRecursive, "recursive", "R", false, "upload files in the current directory recursively")
 	cmd.Flags().BoolVarP(&includeHidden, "include-hidden", "H", false, "include hidden files (\"dot\" files) in the upload")
 	cmd.Flags().StringVarP(&projectSlug, "project", "p", "", "the slug of the working project")
-	cmd.Flags().UintVarP(&multiOpts.Threads, "parallel", "P", 4, "upload number of parts in parallel")
-	cmd.Flags().StringVarP(&multiOpts.Size, "part-size", "s", "128Mib", "each part size")
+	cmd.Flags().IntVarP(&uploadManagerOpts.Threads, "parallel", "P", 4, "number of uploads (could be part) in parallel")
+	cmd.Flags().StringVarP(&uploadManagerOpts.PartSize, "part-size", "s", "128Mib", "each part size")
 	cmd.Flags().DurationVar(&timeout, "response-timeout", 5*time.Minute, "server response time out")
-	cmd.Flags().BoolVar(&hideMonitor, "hide-monitor", false, "hide the upload status monitor")
 
 	return cmd
 }

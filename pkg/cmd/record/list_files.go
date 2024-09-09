@@ -16,12 +16,15 @@ package record
 
 import (
 	"context"
+	"fmt"
 	"os"
 
+	"connectrpc.com/connect"
 	"github.com/coscene-io/cocli/internal/config"
 	"github.com/coscene-io/cocli/internal/printer"
 	"github.com/coscene-io/cocli/internal/printer/printable"
 	"github.com/coscene-io/cocli/internal/printer/table"
+	"github.com/coscene-io/cocli/internal/utils"
 	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 )
@@ -48,7 +51,10 @@ func NewListFilesCommand(cfgPath *string) *cobra.Command {
 
 			// Handle args and flags.
 			recordName, err := pm.RecordCli().RecordId2Name(context.TODO(), args[0], proj)
-			if err != nil {
+			if utils.IsConnectErrorWithCode(err, connect.CodeNotFound) {
+				fmt.Printf("failed to find record: %s in project: %s\n", args[0], proj)
+				return
+			} else if err != nil {
 				log.Fatalf("unable to get record name from %s: %v", args[0], err)
 			}
 

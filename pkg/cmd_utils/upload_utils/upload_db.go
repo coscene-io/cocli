@@ -1,13 +1,16 @@
 package upload_utils
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
+
 	"github.com/coscene-io/cocli/internal/constants"
 	"github.com/minio/sha256-simd"
 	"github.com/pkg/errors"
 	bolt "go.etcd.io/bbolt"
-	"os"
-	"path/filepath"
 )
 
 const (
@@ -18,10 +21,12 @@ type UploadDB struct {
 	*bolt.DB
 }
 
-func NewUploadDB(filename string, recordId string, hash string) (*UploadDB, error) {
+func NewUploadDB(filename string, recordId string, hash string, partSize uint64) (*UploadDB, error) {
 	// Compute the db file name by hashing the filepath and recordId
+	// todo: add part size
 	h := sha256.New()
-	h.Write([]byte(recordId + hash + filename))
+	partSizeHash := fmt.Sprintf("%0*s", 20, strconv.FormatUint(partSize, 10))
+	h.Write([]byte(recordId + hash + partSizeHash + filename))
 
 	boltDB, err := bolt.Open(filepath.Join(constants.DefaultUploaderDirPath, fmt.Sprintf("%x.db", h.Sum(nil))), 0600, nil)
 	if err != nil {
@@ -41,7 +46,7 @@ func NewUploadDB(filename string, recordId string, hash string) (*UploadDB, erro
 
 // Get retrieves the value of a key from the database.
 // if the key does not exist, it returns nil.
-func (db *UploadDB) Get(key string) ([]byte, error) {
+func (db *UploadDB) Get(key string, objectPtr interface{}) error {
 	var value []byte
 	err := db.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket([]byte(multipartUploadsBucket))
@@ -49,27 +54,14 @@ func (db *UploadDB) Get(key string) ([]byte, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	return value, err
-}
+	if err = json.Unmarshal(value, objectPtr); err != nil {
+		return errors.Wrapf(err, "unmarshal %s", key)
+	}
 
-// BatchPut puts a batch of key-value pairs into the database.
-func (db *UploadDB) BatchPut(kvs map[string][]byte) error {
-	return db.Update(func(tx *bolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists([]byte(multipartUploadsBucket))
-		if err != nil {
-			return err
-		}
-		for k, v := range kvs {
-			err = bucket.Put([]byte(k), v)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	return nil
 }
 
 // Reset removes all the keys from the database multipart_uploads bucket.
@@ -86,5 +78,9 @@ func (db *UploadDB) Reset() error {
 
 // Delete removes the database file from the filesystem.
 func (db *UploadDB) Delete() error {
-	return os.Remove(db.Path())
+	if err := os.Remove(db.Path()); err != nil {
+		return errors.Wrapf(err, "remove db %s", db.Path())
+	}
+
+	return db.Close()
 }
