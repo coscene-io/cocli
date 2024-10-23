@@ -19,22 +19,20 @@ import (
 	"os"
 	"time"
 
+	"github.com/coscene-io/cocli/internal/utils"
 	"github.com/coscene-io/cocli/pkg/cmd"
 	"github.com/getsentry/sentry-go"
 	log "github.com/sirupsen/logrus"
 )
 
 func main() {
-	log.SetFormatter(&log.TextFormatter{
-		DisableTimestamp: true,
-	})
-
 	err := sentry.Init(sentry.ClientOptions{
 		Dsn: "https://b3bcd9e4d101f927b5f1f7ac67d9b115@sentry.coscene.site/23",
 		// Set TracesSampleRate to 1.0 to capture 100%
 		// of transactions for tracing.
 		// We recommend adjusting this value in production,
 		TracesSampleRate: 1.0,
+		AttachStacktrace: true,
 	})
 	if err != nil {
 		log.Fatalf("sentry.Init: %s", err)
@@ -44,9 +42,15 @@ func main() {
 
 	defer func() {
 		if r := recover(); r != nil {
-			sentry.CaptureException(fmt.Errorf("%v", r))
+			sentry.CurrentHub().Recover(r)
+			panic(r)
 		}
 	}()
+
+	log.SetFormatter(&log.TextFormatter{
+		DisableTimestamp: true,
+	})
+	log.AddHook(utils.NewSentryHook())
 
 	if err := cmd.NewCommand().Execute(); err != nil {
 		fmt.Println(err)

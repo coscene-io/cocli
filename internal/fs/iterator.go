@@ -23,7 +23,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// GenerateFiles generates a channel of file paths in the given directory.
+// FindFiles generates file paths in the given directory.
 // It will walk through the directory and return the absolute path of each file.
 // Note that if root is a file, it will return the file itself.
 //
@@ -32,46 +32,47 @@ import (
 //
 // If includeHidden is true, it will include hidden files (files starting with a dot).
 // Otherwise, it will skip hidden files.
-func GenerateFiles(root string, isRecursive, includeHidden bool) <-chan string {
-	c := make(chan string)
+func FindFiles(root string, isRecursive, includeHidden bool) []string {
+	var files []string
 
-	go func() {
-		defer close(c)
-		err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
+	if root == "" {
+		return files
+	}
 
-			// Skip the .[constants.CLIName] directory
-			if d.IsDir() && d.Name() == "."+constants.CLIName {
-				return filepath.SkipDir
-			}
-
-			// Skip hidden files if not includeHidden
-			if !includeHidden && strings.HasPrefix(d.Name(), ".") {
-				if d.IsDir() {
-					return filepath.SkipDir
-				} else {
-					return nil
-				}
-			}
-
-			// skip directories if not recursive
-			if d.IsDir() && !isRecursive && path != root {
-				return filepath.SkipDir
-			}
-
-			if !d.IsDir() {
-				c <- path
-			}
-
-			return nil
-		})
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			log.Errorf("unable to walk through directory: %v", err)
-			return
+			return err
 		}
-	}()
 
-	return c
+		// Skip the .[constants.CLIName] directory
+		if d.IsDir() && d.Name() == "."+constants.CLIName {
+			return filepath.SkipDir
+		}
+
+		// Skip hidden files if not includeHidden
+		if !includeHidden && strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			} else {
+				return nil
+			}
+		}
+
+		// Skip directories if not recursive
+		if d.IsDir() && !isRecursive && path != root {
+			return filepath.SkipDir
+		}
+
+		if !d.IsDir() {
+			files = append(files, path)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Errorf("unable to walk through directory: %v", err)
+	}
+
+	return files
 }
